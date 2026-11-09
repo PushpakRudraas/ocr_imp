@@ -1,0 +1,118 @@
+# Whole stack:  docker compose up -d --build     ->  UI on http://localhost:8080
+# Infra only (for local dev / tests):  docker compose up -d mongo postgres neo4j
+# Credentials come from .env (see .env.example); the defaults below are for local development only.
+name: newspaper
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  mongo:                       # raw events: pages, OCR articles (raw_events), clean_events, enriched_events, counters
+    <<: *restart
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-newspaper}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-newspaper-dev}
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  postgres:                    # pgvector: article embeddings for cross-paper story matching
+    <<: *restart
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-newspaper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-newspaper-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-newspaper}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-newspaper} -d ${POSTGRES_DB:-newspaper}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  neo4j:                       # relationships: papers, articles, stories, entities and the relations between them
+    <<: *restart
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-newspaper-dev}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+    volumes:
+      - neo4j-data:/data
+    ports:
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_PASSWORD:-newspaper-dev}' 'RETURN 1' >/dev/null 2>&1"]
+      interval: 8s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  api:                         # FastAPI + the pipeline (OCR, clean, cluster, enrich)
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      NP_WORKDIR: /data
+      NP_STORE: mongo
+      NP_MONGO_URI: mongodb://${MONGO_USER:-newspaper}:${MONGO_PASSWORD:-newspaper-dev}@mongo:27017/?authSource=admin
+      NP_MONGO_DB: newspaper
+      NP_INDEX: pgvector
+      NP_EMBED_DIM: "384"            # paraphrase-multilingual-MiniLM-L12-v2
+      NP_EMBEDDER: ${NP_EMBEDDER:-minilm}
+      NP_ENRICH_MODELS: ${NP_ENRICH_MODELS:-hf}
+      NP_PG_DSN: postgresql://${POSTGRES_USER:-newspaper}:${POSTGRES_PASSWORD:-newspaper-dev}@postgres:5432/${POSTGRES_DB:-newspaper}
+      NP_GRAPH: neo4j
+      NP_NEO4J_URI: bolt://neo4j:7687
+      NP_NEO4J_USER: neo4j
+      NP_NEO4J_PASSWORD: ${NEO4J_PASSWORD:-newspaper-dev}
+      NP_OCR: ${NP_OCR:-auto}
+      NP_TRANSLATOR: ${NP_TRANSLATOR:-aws}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      - api-data:/data
+      - hf-models:/models           # HuggingFace model cache: downloaded once on first run
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      mongo: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/config', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  web:                         # nginx: the built Vite UI + reverse proxy to the API
+    <<: *restart
+    build:
+      context: ./frontend
+    depends_on:
+      api: {condition: service_healthy}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  mongo-data:
+  pg-data:
+  neo4j-data:
+  api-data:
+  hf-models:

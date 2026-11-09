@@ -1,0 +1,28 @@
+# One run = one publication date. Add/remove papers freely; ids are slugs used in output paths.
+run_date: 2026-11-02
+papers:
+  - id: the_hindu
+    name: The Hindu
+    language: en
+    edition: Delhi
+    reputation: high            # high | medium | low | not_rated  (feeds the credibility block)
+    pdf: data/inbox/the_hindu.pdf
+  - id: toi
+    name: The Times of India
+    language: en
+    edition: Delhi
+    reputation: high
+    pdf: data/inbox/toi.pdf
+  - id: indian_express
+    name: The Indian Express
+    language: en
+    edition: Delhi
+    reputation: high
+    url: https://example.com/epaper/indian_express_2026-11-02.pdf   # downloaded if no local pdf
+  - id: dainik_jagran
+    name: Dainik Jagran
+    language: hi
+    edition: Delhi
+    reputation: medium
+    pdf: data/inbox/dainik_jagran.pdf
+    pages: "1-12"               # optional page limit

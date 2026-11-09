@@ -1,0 +1,20 @@
+# What the api container installs (no test or optional-GPU packages).
+pymupdf>=1.24
+pyyaml>=6
+pillow>=10
+numpy>=1.26
+scikit-learn>=1.4
+datasketch>=1.6
+pycountry>=24.6
+python-dateutil>=2.9
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+pymongo>=4.7
+psycopg[binary]>=3.1
+neo4j>=5.20
+rapidocr-onnxruntime>=1.3        # CPU OCR for scanned e-papers
+boto3>=1.34                      # AWS Translate (NP_TRANSLATOR=aws)
+transformers>=4.44                # NER / zero-shot topic / sentiment / emotion models
+sentence-transformers>=3.0        # paraphrase-multilingual-MiniLM-L12-v2 embeddings
+sentencepiece>=0.2                # tokenizers for mDeBERTa / XLM-R

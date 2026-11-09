@@ -1,0 +1,43 @@
+# secrets - keep .env.example, never .env
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# pipeline output and local data
+data/
+out/
+*.sqlite
+*.sqlite-journal
+*.log
+
+# downloaded model caches (HuggingFace, torch)
+models/
+.cache/
+huggingface/
+*.safetensors
+*.onnx
+*.bin
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.vite/
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
