@@ -63,6 +63,7 @@ class StoryClusterer:
         self._story_of: dict[str, str] = {}           # event_id -> story id (pre-merge, resolved via union-find)
         self._meta: dict[str, dict] = {}
         self.merges: list[tuple[str, str]] = []
+        self._pre_vec: dict = {}                      # event_id -> vector embedded ahead of time in a batch
 
     # ----------------------------------------------------------------------------------------------- core
     def _window_filter(self, article: dict):
@@ -95,7 +96,9 @@ class StoryClusterer:
         eid = article["event_id"]
         if eid in self._articles:
             return self.result_for(eid)
-        vec = self.embedder.embed([embedding_text(article)])[0]
+        vec = self._pre_vec.pop(eid, None)
+        if vec is None:
+            vec = self.embedder.embed([embedding_text(article)])[0]
         cands = self.index.search(vec, self.s.candidate_top_k, self._window_filter(article))
 
         matches, borderline, near_dup = [], [], None
@@ -171,8 +174,15 @@ class StoryClusterer:
 
     def cluster_all(self, articles: list[dict]) -> list[dict]:
         """Add a batch (deterministic order) and annotate each article with its final cluster fields."""
-        for a in sorted(articles, key=lambda x: (x["date"], x["paper_id"], x["page_no"], x["event_id"])):
+        ordered = sorted(articles, key=lambda x: (x["date"], x["paper_id"], x["page_no"], x["event_id"]))
+        todo = [a for a in ordered if a["event_id"] not in self._articles]
+        for i in range(0, len(todo), 64):                      # embed in batches (one GPU call per 64 articles)
+            chunk = todo[i:i + 64]
+            vecs = self.embedder.embed([embedding_text(a) for a in chunk])
+            self._pre_vec.update({a["event_id"]: v for a, v in zip(chunk, vecs)})
+        for a in ordered:
             self.add(a)
+        self._pre_vec.clear()
         stories = self.stories()
         for a in articles:
             r = self.result_for(a["event_id"])

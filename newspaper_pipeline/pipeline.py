@@ -127,7 +127,13 @@ class Pipeline:
 
     def enrich(self, arts: list[dict], day: str | None = None) -> list[dict]:
         with self._timed("enrich"):
-            docs = [enrich_article(a, self.models) for a in arts]
+            if getattr(self.models, "prefetch", None):          # one big GPU batch per model instead of one call per article
+                self.models.prefetch([(a["working_headline"], a["working_text"]) for a in arts])
+            try:
+                docs = [enrich_article(a, self.models) for a in arts]
+            finally:
+                if getattr(self.models, "clear_cache", None):
+                    self.models.clear_cache()
             docs = enrich_stories(docs, self.store, day)
             if self.refiner:
                 docs = [self.refiner.refine(d) for d in docs]

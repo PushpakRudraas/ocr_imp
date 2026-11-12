@@ -72,3 +72,26 @@ def test_chunks_respect_limit():
     parts = _chunks("Sentence one. " * 400, 500)
     assert len(parts) > 1 and all(len(p) <= 500 for p in parts)
     assert _chunks("") == []
+
+
+def test_prefetch_batches_and_matches_per_article_results():
+    calls = {"n": 0}
+
+    def counting_factory(task, model, **kw):
+        inner = fake_factory(task, model, **kw)
+
+        def pipe(x, batch_size=None, **k):
+            calls["n"] += 1
+            return [inner(t, **k) if task == "zero-shot-classification" else inner(t) for t in x] if isinstance(x, list) else inner(x, **k) if task == "zero-shot-classification" else inner(x)
+        return pipe
+
+    base = HfModels(pipeline_factory=fake_factory)
+    fast = HfModels(pipeline_factory=counting_factory)
+    fast.prefetch([(HEAD, TEXT), ("Other headline", "Chandigarh saw rain on Monday.")])
+    batched_calls = calls["n"]
+    assert 0 < batched_calls <= 4                                   # one call per model, not one per article
+    assert [(m.text, m.kind) for m in fast.ner(TEXT)] == [(m.text, m.kind) for m in base.ner(TEXT)]
+    assert fast.topic(f"{HEAD}. {TEXT}") == base.topic(f"{HEAD}. {TEXT}")
+    assert calls["n"] == batched_calls                              # per-article calls were served from the cache
+    fast.clear_cache()
+    assert not fast._cache
