@@ -11,6 +11,7 @@ export interface PaperMeta {
   size: number;
 }
 
+/** Phase-1 numbers are always present once extraction is done; the story numbers only exist after enrichment. */
 export interface Metrics {
   run_date: string;
   papers: string[];
@@ -21,13 +22,26 @@ export interface Metrics {
   mean_ocr_confidence: number | null;
   articles_flagged_review: number;
   translated: number;
-  stories: number;
-  multi_paper_stories: number;
-  largest_story_papers: number;
-  borderline_matches: number;
+  stories?: number;
+  multi_paper_stories?: number;
+  largest_story_papers?: number;
+  borderline_matches?: number;
   stage_seconds: Record<string, number>;
 }
 
+/** The enrichment phase, tracked separately from the run's extraction `status`. */
+export type EnrichState = 'off' | 'queued' | 'running' | 'done' | 'failed';
+
+export interface Enrichment {
+  state: EnrichState;
+  stage: string | null;
+  error: string | null;
+  queued_at: number | null;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+/** `status`/`stage` describe extraction (PDF -> OCR -> clean + translate -> stored in MongoDB); `enrichment` the optional second phase. */
 export interface Run {
   id: string;
   created_at: number;
@@ -38,6 +52,8 @@ export interface Run {
   metrics: Metrics | null;
   error: string | null;
   finished_at: number | null;
+  enrich_after: boolean;
+  enrichment: Enrichment;
 }
 
 export interface Capabilities {
@@ -50,6 +66,26 @@ export interface Capabilities {
   max_upload_mb: number;
   max_papers: number;
   stages: string[];
+  enrich_stages: string[];
+  enrichment_bus: 'kafka' | 'inline';
+}
+
+/** One cleaned (and translated) article as stored after phase 1, before any enrichment. */
+export interface CleanArticle {
+  event_id: string;
+  paper: string;
+  paper_id: string;
+  page_no: number | null;
+  headline: string;
+  translated_headline: string | null;
+  byline: string | null;
+  language: string | null;
+  translation_status: string | null;
+  ocr_confidence: number | null;
+  status: string | null;
+  chars: number;
+  excerpt: string;
+  exact_duplicate_of: string | null;
 }
 
 export interface Coverage {

@@ -34,13 +34,17 @@ borderline story matches), `metrics.json`.
 ```bash
 cp .env.example .env            # change the passwords for anything beyond a laptop
 docker compose up -d --build    # first build is ~2 min (the api image bundles the OCR runtime, ~1.5 GB)
-open http://localhost:8080      # upload UI;  docker compose down  stops it,  down -v also deletes the data
+open http://localhost:8080      # upload UI (port = WEB_PORT in .env);  docker compose down  stops it,  down -v also deletes the data
 ```
 
 | Service | Image | Role | Data |
 |---|---|---|---|
 | `web` | nginx + built Vite UI | UI on `:8080`, proxies `/api` to the API (streams large PDF uploads) | - |
-| `api` | `Dockerfile.api` (Python 3.12) | FastAPI + the whole pipeline; runs one job at a time | uploads/outputs in volume `api-data` |
+| `api` | `Dockerfile.api` (Python 3.12) | FastAPI: accepts uploads, **publishes jobs to Kafka**, serves results. Does no pipeline work | uploads/outputs in volume `api-data` |
+| `kafka` | `apache/kafka:3.8.0` (KRaft, single node) | carries every hop: topics `newspaper.jobs.extract`, `.events.clean`, `.jobs.enrich`, `.events.enriched` | volume `kafka-data` |
+| `extract-worker` | same image | **phase 1**: consumes `jobs.extract` -> PDF -> OCR + layout -> clean + translate -> publishes `events.clean` | shares `api-data` |
+| `datasync` | same image | the **only writer of pipeline documents to MongoDB**: consumes `events.clean` / `events.enriched`, upserts, then marks the run done (and queues enrichment if it was asked for) | shares `api-data` |
+| `enrich-worker` | same image | **phase 2**: consumes `jobs.enrich` -> reads the clean events back from Mongo -> cluster + enrich (NLP models, pgvector, Neo4j) -> publishes `events.enriched` | shares `api-data` / `hf-models` |
 | `mongo` | `mongo:7` | **raw events**: collections `pages`, `raw_events` (articles straight from OCR), `clean_events`, `enriched_events`, `counters` | volume `mongo-data` |
 | `postgres` | `pgvector/pgvector:pg16` | **embeddings**: table `article_embeddings` (vector + HNSW index, story id, date) used for cross-paper matching, also across runs | volume `pg-data` |
 | `neo4j` | `neo4j:5-community` | **relationships**: `Paper <- Article -> Story`, `Article -> Entity`, and `Entity -[RESIGNED_FROM, ASSOCIATED_WITH, LOCATED_IN, HEADS...]-> Entity` | volume `neo4j-data` |
@@ -67,11 +71,47 @@ pgvector and Neo4j containers on random ports - it never touches the compose sta
 parity with SQLite, pgvector parity with the in-memory index, cross-run story matching, graph shape/idempotency/injection safety,
 and one test that runs the whole pipeline into all three databases at once.
 
+## The flow: everything passes through Kafka
+
+```
+upload --> api --[jobs.extract]--> extract-worker   PDF -> OCR + layout -> clean + translate
+                                        |
+                                  [events.clean]    pages, raw_events, clean_events + an "extract_done" marker
+                                        v
+                                    datasync --> MongoDB        run is DONE only once its documents are stored
+                                        |  (only if "Run enrichment" was on, or later via the button)
+                                  [jobs.enrich]     pointers only: run_id, run_date, clean event_ids
+                                        v
+                                  enrich-worker     reads clean_events from MongoDB -> cluster + enrich (+ pgvector, Neo4j)
+                                        |
+                                 [events.enriched]  enriched_events + an "enrich_done" marker
+                                        v
+                                    datasync --> MongoDB        enrichment is DONE only once stored
+```
+
+* **datasync is the only service that writes pipeline documents to MongoDB.** The workers' store is a `BusStore`: reads and the
+  daily burst/novelty counters go to the database, but every document they produce is published to Kafka instead
+  (`busstore.py`). The extract worker never even connects to Mongo.
+* The upload page has a **"Run enrichment after extraction"** switch (off by default). Off: the run ends once the cleaned,
+  translated articles are stored, and the run page shows them (Articles tab). A finished run has a **Run enrichment** button
+  (which publishes the same `jobs.enrich` message); a failed enrichment has **Retry**.
+* The enrichment job is one message per *run*, not per article, because story clustering needs the whole batch.
+* A run's documents and its marker share a key and the topics have one partition, so the marker is consumed after the documents.
+  datasync checks that every article named in the marker is really in Mongo before marking anything done.
+* Delivery is at-least-once: offsets are committed after a batch is handled and every write is an upsert, so redelivery is harmless.
+  If MongoDB is down, datasync does not commit; it restarts and Kafka redelivers, so no document is lost.
+  Progress and errors go to the run's `run.json` (shared volume), which the UI polls through the API.
+* Without Kafka (`NP_BUS=inline`, the default outside compose) the API runs both phases itself and writes straight to the store:
+  same code, no broker. `python -m newspaper_pipeline run` / `demo` also run both phases back to back.
+* API: `POST /api/runs` takes `enrich=true`, `POST /api/runs/{id}/enrich` starts phase 2 later, `GET /api/runs/{id}/clean`
+  returns the phase-1 articles. Env: `NP_BUS` (`inline|kafka`), `NP_KAFKA_BOOTSTRAP`, `NP_KAFKA_GROUP`, `NP_TOPIC_EXTRACT`,
+  `NP_TOPIC_CLEAN`, `NP_KAFKA_TOPIC` (enrich jobs), `NP_TOPIC_ENRICHED`.
+
 ## Web UI (upload from the browser)
 
 `frontend/` is a Vite + React + TypeScript app; `newspaper_pipeline/api/` is the FastAPI server it talks to. Upload one
 e-paper PDF per newspaper (drag & drop; the name, language and date are guessed from the filename and editable), watch the
-six stages progress, then compare each story across papers side by side (original / English text, claims with
+extraction stages (and, if switched on, the enrichment stages) progress, read the cleaned articles, then compare each story across papers side by side (original / English text, claims with
 cross-paper verification, enrichment JSON) and review flagged articles.
 
 ```bash

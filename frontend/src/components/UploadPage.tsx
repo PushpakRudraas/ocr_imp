@@ -41,6 +41,7 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [enrich, setEnrich] = useState(false);                // enrichment is slow: off unless asked for
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -80,7 +81,7 @@ export default function UploadPage() {
     setError(null);
     setProgress(0);
     try {
-      const run = await createRun(runDate, items, setProgress);
+      const run = await createRun(runDate, items, enrich, setProgress);
       navigate(`/runs/${run.id}`);
     } catch (e) {
       setProgress(null);
@@ -95,8 +96,8 @@ export default function UploadPage() {
       <section className="card">
         <h1>Upload today's newspapers</h1>
         <p className="muted">
-          Add the e-paper PDF of each newspaper. The pipeline reads every page, splits it into articles, translates, finds the
-          same story across papers and enriches it.
+          Add the e-paper PDF of each newspaper. The pipeline reads every page, splits it into articles, cleans and translates
+          them and stores them in MongoDB. Enrichment (story matching, entities, claims) is a separate step you can switch on below.
         </p>
 
         <div
@@ -155,6 +156,18 @@ export default function UploadPage() {
         {nonEnglish && caps && caps.translator === 'none' && caps.embedder === 'hashing' && (
           <p className="notice warn">No translator is configured: non-English papers will be read but not matched to English coverage of the same story.</p>
         )}
+
+        <label className="toggle">
+          <input type="checkbox" role="switch" checked={enrich} disabled={uploading} onChange={(e) => setEnrich(e.target.checked)} />
+          <span>
+            <strong>Run enrichment after extraction</strong>
+            <span className="muted small">
+              {enrich
+                ? caps?.enrichment_bus === 'inline' ? 'Enrichment starts in this server as soon as the articles are stored.' : 'Once the articles are stored, a job is queued on Kafka and the enrichment worker picks it up.'
+                : 'Off: the run stops once the cleaned articles are stored. You can start enrichment from the run page whenever you want.'}
+            </span>
+          </span>
+        </label>
 
         <div className="form-footer">
           <label className="inline">Publication date

@@ -26,6 +26,10 @@ describe('buildUploadForm', () => {
       { name: 'TOI', language: 'hi', edition: 'main', reputation: 'high' }]);
     expect((form.getAll('files') as File[]).map((f) => f.name)).toEqual(['a.pdf', 'b.pdf']);
   });
+  it('sends the enrichment toggle, off unless asked for', () => {
+    expect(buildUploadForm('2026-11-02', [item('a.pdf', 'The Hindu')]).get('enrich')).toBe('false');
+    expect(buildUploadForm('2026-11-02', [item('a.pdf', 'The Hindu')], true).get('enrich')).toBe('true');
+  });
 });
 
 describe('fetch helpers', () => {
@@ -59,7 +63,7 @@ describe('createRun', () => {
   it('posts multipart, reports progress and resolves with the run', async () => {
     vi.stubGlobal('XMLHttpRequest', FakeXHR);
     const seen: number[] = [];
-    const p = createRun('2026-11-02', [item('a.pdf', 'The Hindu')], (f) => seen.push(f));
+    const p = createRun('2026-11-02', [item('a.pdf', 'The Hindu')], true, (f) => seen.push(f));
     const x = FakeXHR.last;
     expect(x.method).toBe('POST'); expect(x.url).toBe('/api/runs');
     x.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 });
@@ -67,7 +71,7 @@ describe('createRun', () => {
     x.onload?.();
     expect(await p).toMatchObject({ id: 'abcdefabcdef' });
     expect(seen).toEqual([0.5]);
-    expect(x.body?.get('run_date')).toBe('2026-11-02');
+    expect(x.body?.get('run_date')).toBe('2026-11-02'); expect(x.body?.get('enrich')).toBe('true');
   });
   it('rejects with the server detail on 4xx and on network error', async () => {
     vi.stubGlobal('XMLHttpRequest', FakeXHR);

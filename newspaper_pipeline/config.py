@@ -42,3 +42,13 @@ class Settings:
     # translation
     target_language: str = os.environ.get("NP_TARGET_LANGUAGE", "en")
     translate_chunk_chars: int = _i("NP_TRANSLATE_CHUNK_CHARS", 2000)
+    # Kafka: with bus=kafka EVERY hop goes through it. API -> extract.jobs -> OCR+clean worker -> events.clean ->
+    # data sync (writes MongoDB) -> enrich.jobs -> enrichment worker -> events.enriched -> data sync (writes MongoDB).
+    # bus=inline runs both phases inside the API process (dev / tests, no broker needed).
+    bus_backend: str = os.environ.get("NP_BUS", "inline")              # inline | kafka
+    kafka_bootstrap: str = os.environ.get("NP_KAFKA_BOOTSTRAP", "localhost:9092")
+    kafka_group: str = os.environ.get("NP_KAFKA_GROUP", "newspaper")   # consumer groups: <group>-extract / -sync / -enrich
+    topic_extract_jobs: str = os.environ.get("NP_TOPIC_EXTRACT", "newspaper.jobs.extract")
+    topic_enrich_jobs: str = os.environ.get("NP_KAFKA_TOPIC", "newspaper.jobs.enrich")
+    topic_clean_events: str = os.environ.get("NP_TOPIC_CLEAN", "newspaper.events.clean")
+    topic_enriched_events: str = os.environ.get("NP_TOPIC_ENRICHED", "newspaper.events.enriched")

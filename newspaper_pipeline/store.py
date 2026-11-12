@@ -36,6 +36,15 @@ class Store:
         for d in docs:
             self.put(stage, d[key_field], d)
 
+    def put_keyed_many(self, stage: str, items: list[tuple[str, dict]]) -> None:
+        """Upsert (key, doc) pairs; used by the data-sync service, which receives the key alongside the document."""
+        for key, doc in items:
+            self.put(stage, key, doc)
+
+    def missing(self, stage: str, keys: list[str]) -> list[str]:
+        have = {r[0] for r in self.db.execute("SELECT key FROM docs WHERE stage=?", (stage,))}
+        return [k for k in keys if k not in have]
+
     def get(self, stage: str, key: str) -> dict | None:
         row = self.db.execute("SELECT body FROM docs WHERE stage=? AND key=?", (stage, key)).fetchone()
         return json.loads(row[0]) if row else None
@@ -112,6 +121,15 @@ class MongoStore:
             return
         ops = [ReplaceOne({"_id": d[key_field]}, self._wrap(d[key_field], d), upsert=True) for d in docs]
         self._col(stage).bulk_write(ops, ordered=False)
+
+    def put_keyed_many(self, stage: str, items: list[tuple[str, dict]]) -> None:
+        from pymongo import ReplaceOne
+        if items:
+            self._col(stage).bulk_write([ReplaceOne({"_id": k}, self._wrap(k, d), upsert=True) for k, d in items], ordered=False)
+
+    def missing(self, stage: str, keys: list[str]) -> list[str]:
+        have = {d["_id"] for d in self._col(stage).find({"_id": {"$in": list(keys)}}, {"_id": 1})}
+        return [k for k in keys if k not in have]
 
     def get(self, stage: str, key: str) -> dict | None:
         doc = self._col(stage).find_one({"_id": key})

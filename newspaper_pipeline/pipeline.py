@@ -6,6 +6,11 @@
     cluster -> clean (+story)   (cross-paper dedup / story clustering)
     enrich  -> enriched         (per-article + per-story enrichment, sample.json schema)
     export  -> JSON files, stories.json, review.json, metrics.json
+
+The stages form two phases. `extract` (ingest -> ocr -> clean) ends with the cleaned, translated events stored in the
+Store (MongoDB `clean_events`); it is cheap enough to run immediately. `enrich_stored` (cluster -> enrich -> graph ->
+export) is the slow ML phase: it reads those stored clean events back and writes `enriched_events`, so it can run later
+and elsewhere (see jobs.py / worker.py, driven over Kafka). `run` chains both, as before, unless `enrich=False`.
 """
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ from .input.manifest import Manifest
 from .input.splitter import PageRecord, split_edition
 from .ocr.backends import OcrEngine
 from .ocr.run import OcrUnavailable, extract_edition
-from .output.export import export_all
+from .output.export import export_all, export_clean
 from .store import make_store
 
 log = logging.getLogger("np.pipeline")
@@ -38,6 +43,14 @@ class RunResult:
     docs: list[dict]
     metrics: dict
     export: dict = field(default_factory=dict)
+
+
+@dataclass
+class Extraction:
+    """What phase 1 produced: pages, raw OCR events and the cleaned events now sitting in the store."""
+    pages: list
+    recs: list[dict]
+    arts: list[dict]
 
 
 class Pipeline:
@@ -54,6 +67,7 @@ class Pipeline:
         self.render_pages = render_pages
         self.on_stage = on_stage or (lambda name: None)      # progress hook: called with the stage about to run
         self.timings: dict[str, float] = {}
+        self.device: str | None = None                       # "cuda" | "cpu": where the enrichment models run (set by build_pipeline)
 
     def _timed(self, name: str):
         class _T:
@@ -121,24 +135,54 @@ class Pipeline:
         return docs
 
     # ----------------------------------------------------------------------------------------------- run
-    def run(self, manifest: Manifest, out_dir: str | Path | None = None) -> RunResult:
-        t0 = time.time()
+    def extract(self, manifest: Manifest) -> Extraction:
+        """Phase 1: PDFs -> OCR + layout -> clean + translate -> stored `clean` events. No models beyond OCR/translation."""
         self.on_stage("ingest"); pages = self.ingest(manifest)
         self.on_stage("ocr"); recs = self.ocr(pages)
         self.on_stage("clean"); arts = self.clean(recs)
+        return Extraction(pages, recs, arts)
+
+    def enrich_stored(self, day: str, event_ids: list[str] | None = None, out_dir: str | Path | None = None,
+                      base_metrics: dict | None = None) -> RunResult:
+        """Phase 2: read the stored clean events (those in `event_ids`, else every one of `day`) back from the store,
+        then cluster -> enrich -> graph -> export. Writes `enriched` events. `base_metrics` = phase-1 metrics to extend."""
+        t0 = time.time()
+        if event_ids is not None:
+            arts = [a for a in (self.store.get("clean", e) for e in event_ids) if a is not None]
+            if len(arts) != len(event_ids):
+                log.warning("enrich: %d of %d clean events are missing from the store", len(event_ids) - len(arts), len(event_ids))
+        else:
+            arts = self.store.all("clean", day)
+        if not arts:
+            raise ValueError("no clean events to enrich - run the extraction phase first")
         self.on_stage("cluster"); arts = self.cluster(arts)
-        self.on_stage("enrich"); docs = self.enrich(arts, manifest.run_date.isoformat())
+        self.on_stage("enrich"); docs = self.enrich(arts, day)
         graph_summary = None
         if self.graph:
             self.on_stage("graph")
             with self._timed("graph"):
                 graph_summary = self.graph.write(docs)
         self.on_stage("export")
-        metrics = self.metrics(manifest, pages, recs, docs)
-        metrics["graph"] = graph_summary
-        metrics["stage_seconds"] = {**self.timings, "total": round(time.time() - t0, 3)}
+        base = dict(base_metrics or {})
+        metrics = {**base, **self.enrichment_metrics(docs), "graph": graph_summary, "enrich_device": self.device,
+                   "stage_seconds": {**(base.get("stage_seconds") or {}), **self.timings}}
+        metrics["stage_seconds"]["total"] = round(metrics["stage_seconds"].get("total", 0) + time.time() - t0, 3)
         exp = export_all(docs, out_dir, metrics) if out_dir else {}
         return RunResult(docs, metrics, exp)
+
+    def run(self, manifest: Manifest, out_dir: str | Path | None = None, enrich: bool = True) -> RunResult:
+        """Both phases back to back (CLI/demo). `enrich=False` stops after phase 1 and returns phase-1 metrics only."""
+        t0 = time.time()
+        ex = self.extract(manifest)
+        metrics = self.extraction_metrics(manifest, ex.pages, ex.recs, ex.arts)
+        metrics["stage_seconds"] = {**self.timings, "total": round(time.time() - t0, 3)}
+        if out_dir:
+            export_clean(ex.arts, out_dir)
+        if not enrich:
+            if out_dir:
+                export_all([], out_dir, metrics)
+            return RunResult([], metrics, {"clean": len(ex.arts)})
+        return self.enrich_stored(manifest.run_date.isoformat(), [a["event_id"] for a in ex.arts], out_dir, metrics)
 
     def close(self) -> None:
         """Release connections (Postgres, Neo4j, Mongo). Safe to call twice."""
@@ -149,10 +193,7 @@ class Pipeline:
                 except Exception:
                     log.exception("error while closing %s", type(obj).__name__)
 
-    def metrics(self, manifest: Manifest, pages: list[PageRecord], recs: list[dict], docs: list[dict]) -> dict:
-        stories: dict[str, set] = {}
-        for d in docs:
-            stories.setdefault(d["story"]["story_id"], set()).add(d["newspaper"]["paper_id"])
+    def extraction_metrics(self, manifest: Manifest, pages: list[PageRecord], recs: list[dict], arts: list[dict]) -> dict:
         confs = [r["ocr_confidence"] for r in recs]
         return {
             "run_date": manifest.run_date.isoformat(),
@@ -164,7 +205,15 @@ class Pipeline:
             "articles": len(recs),
             "mean_ocr_confidence": round(statistics.mean(confs), 4) if confs else None,
             "articles_flagged_review": sum(r["status"] == "review" for r in recs),
-            "translated": sum(d["newspaper"]["translation_status"] == "translated" for d in docs),
+            "translated": sum(a.get("translation_status") == "translated" for a in arts),
+        }
+
+    @staticmethod
+    def enrichment_metrics(docs: list[dict]) -> dict:
+        stories: dict[str, set] = {}
+        for d in docs:
+            stories.setdefault(d["story"]["story_id"], set()).add(d["newspaper"]["paper_id"])
+        return {
             "stories": len(stories),
             "multi_paper_stories": sum(len(p) > 1 for p in stories.values()),
             "largest_story_papers": max((len(p) for p in stories.values()), default=0),

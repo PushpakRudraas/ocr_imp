@@ -26,12 +26,13 @@ def pdf(papers_dir, pid):
     return (papers_dir / f"{pid}.pdf").read_bytes()
 
 
-def upload(client, papers_dir, items, run_date="2026-11-02"):
+def upload(client, papers_dir, items, run_date="2026-11-02", enrich=True):
     meta, files = [], []
     for pid, name, lang in items:
         meta.append({"name": name, "language": lang, "edition": "Delhi", "reputation": "high"})
         files.append(("files", (f"{pid}.pdf", pdf(papers_dir, pid), "application/pdf")))
-    return client.post("/api/runs", data={"run_date": run_date, "papers": json.dumps(meta)}, files=files)
+    data = {"run_date": run_date, "papers": json.dumps(meta), **({"enrich": "true"} if enrich else {})}
+    return client.post("/api/runs", data=data, files=files)
 
 
 ENGLISH = [("the_hindu", "The Hindu", "en"), ("toi", "The Times of India", "en"), ("indian_express", "The Indian Express", "en")]
@@ -43,7 +44,8 @@ def test_slugify():
 
 def test_config_endpoint(client):
     c = client.get("/api/config").json()
-    assert c["stages"] == ["ingest", "ocr", "clean", "cluster", "enrich", "export"] and c["max_papers"] >= 3
+    assert c["stages"] == ["ingest", "ocr", "clean"] and c["enrich_stages"] == ["cluster", "enrich", "export"]
+    assert c["enrichment_bus"] == "inline" and c["max_papers"] >= 3
 
 
 def test_upload_runs_pipeline_and_serves_results(client, papers_dir):
@@ -81,11 +83,12 @@ def test_progress_reports_stage_and_background_mode(tmp_path, papers_dir):
     rid = upload(c, papers_dir, ENGLISH[:2]).json()["id"]
     for _ in range(100):
         st = c.get(f"/api/runs/{rid}").json()
-        if st["status"] in ("done", "failed"):
+        if st["status"] in ("done", "failed") and st["enrichment"]["state"] in ("done", "failed"):
             break
         time.sleep(0.1)
     assert st["status"] == "done" and st["stage"] == "done"
-    assert seen == ["ingest", "ocr", "clean", "cluster", "enrich", "export"]
+    assert seen == ["ingest", "ocr", "clean", "cluster", "enrich", "export"]      # extraction, then the inline enrichment job
+    assert st["enrichment"]["state"] == "done"
 
 
 def test_results_not_ready_is_409(tmp_path, papers_dir):
@@ -187,7 +190,7 @@ def test_config_reports_backends_and_graph_stage(tmp_path, monkeypatch):
     monkeypatch.setenv("NP_STORE", "mongo"); monkeypatch.setenv("NP_INDEX", "pgvector"); monkeypatch.setenv("NP_GRAPH", "neo4j")
     c = TestClient(create_app(tmp_path / "w", factory, sync=True, frontend_dist=tmp_path / "none")).get("/api/config").json()
     assert (c["store"], c["index"], c["graph"]) == ("mongo", "pgvector", "neo4j")
-    assert c["stages"] == ["ingest", "ocr", "clean", "cluster", "enrich", "graph", "export"]
+    assert c["stages"] == ["ingest", "ocr", "clean"] and c["enrich_stages"] == ["cluster", "enrich", "graph", "export"]
 
 
 def test_pipeline_is_closed_after_every_run(tmp_path, papers_dir):
@@ -202,4 +205,4 @@ def test_pipeline_is_closed_after_every_run(tmp_path, papers_dir):
         return Tracking(settings, Store(settings.db_path), translator=PhraseTableBackend(), on_stage=on_stage, render_pages=False)
     c = TestClient(create_app(tmp_path / "w", make, sync=True, frontend_dist=tmp_path / "none"))
     upload(c, papers_dir, ENGLISH[:2])
-    assert closed == [True]
+    assert closed == [True, True]                      # the extraction pipeline and the (inline) enrichment pipeline

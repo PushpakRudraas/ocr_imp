@@ -54,13 +54,13 @@ def groups(docs_):
 def test_compose_defines_the_whole_stack():
     c = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
     svc = c["services"]
-    assert set(svc) == {"mongo", "postgres", "neo4j", "api", "web"}
+    assert set(svc) == {"mongo", "postgres", "neo4j", "kafka", "api", "extract-worker", "datasync", "enrich-worker", "web"}
     assert svc["postgres"]["image"].startswith("pgvector/pgvector")
     assert svc["mongo"]["image"].startswith("mongo:") and svc["neo4j"]["image"].startswith("neo4j:")
-    for name in ("mongo", "postgres", "neo4j", "api"):
+    for name in ("mongo", "postgres", "neo4j", "kafka", "api"):
         assert "healthcheck" in svc[name], f"{name} needs a healthcheck so depends_on can wait for it"
     deps = svc["api"]["depends_on"]
-    assert all(deps[d]["condition"] == "service_healthy" for d in ("mongo", "postgres", "neo4j"))
+    assert all(deps[d]["condition"] == "service_healthy" for d in ("mongo", "postgres", "neo4j", "kafka"))
     assert svc["web"]["depends_on"]["api"]["condition"] == "service_healthy"
     env = svc["api"]["environment"]
     assert (env["NP_STORE"], env["NP_INDEX"], env["NP_GRAPH"]) == ("mongo", "pgvector", "neo4j")
@@ -69,6 +69,24 @@ def test_compose_defines_the_whole_stack():
     for name in ("mongo", "postgres", "neo4j"):                       # data stores are not exposed beyond localhost
         assert all(p.startswith("127.0.0.1:") for p in svc[name]["ports"]), name
     assert "ports" in svc["web"]
+    # everything passes through Kafka: api -> extract-worker -> datasync -> enrich-worker -> datasync
+    assert "ports" not in svc["kafka"] and svc["kafka"]["image"].startswith("apache/kafka")
+    cmds = {n: svc[n]["command"] for n in ("extract-worker", "datasync", "enrich-worker")}
+    assert cmds == {"extract-worker": ["python", "-m", "newspaper_pipeline.worker", "extract"],
+                    "datasync": ["python", "-m", "newspaper_pipeline.datasync"],
+                    "enrich-worker": ["python", "-m", "newspaper_pipeline.worker", "enrich"]}
+    for n in ("api", "extract-worker", "datasync", "enrich-worker"):
+        e = svc[n]["environment"]
+        assert e["NP_BUS"] == "kafka" and e["NP_KAFKA_BOOTSTRAP"] == "kafka:9092" and e["NP_KAFKA_TOPIC"] == env["NP_KAFKA_TOPIC"], n
+        assert svc[n]["depends_on"]["kafka"]["condition"] == "service_healthy", n
+        if n != "api":
+            assert svc[n]["build"] == svc["api"]["build"] and "api-data:/data" in svc[n]["volumes"], n   # same image; run.json is shared
+    sync, ex, en = svc["datasync"]["environment"], svc["extract-worker"]["environment"], svc["enrich-worker"]["environment"]
+    assert sync["NP_STORE"] == en["NP_STORE"] == "mongo" and sync["NP_MONGO_URI"] == env["NP_MONGO_URI"]
+    assert ex["NP_STORE"] == "sqlite"                                    # extract never writes MongoDB itself (it publishes to Kafka)
+    assert svc["datasync"]["depends_on"]["mongo"]["condition"] == "service_healthy"
+    assert all(en["NP_" + k] == env["NP_" + k] for k in ("INDEX", "GRAPH", "PG_DSN", "NEO4J_URI"))
+    assert "kafka-data" in c["volumes"]
 
 
 def test_dockerfiles_and_env_example_are_consistent():
@@ -78,7 +96,7 @@ def test_dockerfiles_and_env_example_are_consistent():
     assert "proxy_pass http://api:8000" in nginx and "client_max_body_size" in nginx and "try_files" in nginx
     assert "nginx" in (ROOT / "frontend" / "Dockerfile").read_text()
     reqs = (ROOT / "requirements-services.txt").read_text()
-    for pkg in ("pymongo", "psycopg", "neo4j", "fastapi", "pymupdf"):
+    for pkg in ("pymongo", "psycopg", "neo4j", "fastapi", "pymupdf", "confluent-kafka"):
         assert pkg in reqs
     assert "pytest" not in reqs
     example = dict(l.split("=", 1) for l in (ROOT / ".env.example").read_text().splitlines()

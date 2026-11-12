@@ -5,8 +5,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements-services.txt .
-# CPU-only torch first (the default wheel drags in ~2GB of CUDA libraries)
-RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch first, from an explicit index. Default = CUDA 12.8 wheels: needed for RTX 50-series (Blackwell) GPUs and fine for older
+# ones; the same wheel runs on the CPU when a container gets no GPU. Build a smaller CPU-only image with
+#   docker compose build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
+RUN pip install torch --index-url ${TORCH_INDEX}
 RUN pip install -r requirements-services.txt
 COPY newspaper_pipeline ./newspaper_pipeline
 RUN useradd --create-home --uid 10001 app && mkdir /data /models && chown app /data /models

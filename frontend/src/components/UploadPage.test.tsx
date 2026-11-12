@@ -71,9 +71,33 @@ describe('UploadPage', () => {
     await u.selectOptions(screen.getByLabelText('Reputation for toi.pdf'), 'medium');
     await u.click(screen.getByRole('button', { name: /process 2 newspapers/i }));
     await waitFor(() => expect(screen.getByText('run page')).toBeInTheDocument());
-    const [date, items] = m.createRun.mock.calls[0];
+    const [date, items, enrich] = m.createRun.mock.calls[0];
+    expect(enrich).toBe(false);                                           // enrichment is opt-in
     expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(items.map((i) => [i.file.name, i.name, i.reputation])).toEqual([['the_hindu.pdf', 'The Hindu', 'high'], ['toi.pdf', 'TOI Delhi', 'medium']]);
+  });
+
+  it('has an enrichment toggle, off by default, that is sent with the upload', async () => {
+    m.createRun.mockResolvedValue(run({ id: 'abcdefabcdef' }));
+    const u = setup();
+    await add(u, pdfFile('toi.pdf'));
+    const toggle = screen.getByRole('switch', { name: /Run enrichment after extraction/ });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText(/Off: the run stops once the cleaned articles are stored/)).toBeInTheDocument();
+    await u.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(screen.getByText(/queued on Kafka/)).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: /process/i }));
+    await waitFor(() => expect(m.createRun).toHaveBeenCalled());
+    expect(m.createRun.mock.calls[0][2]).toBe(true);
+  });
+
+  it('describes inline enrichment when no Kafka is configured', async () => {
+    m.getConfig.mockResolvedValue({ ...caps, enrichment_bus: 'inline' });
+    const u = setup();
+    await add(u, pdfFile('toi.pdf'));
+    await u.click(screen.getByRole('switch', { name: /Run enrichment after extraction/ }));
+    expect(await screen.findByText(/starts in this server/)).toBeInTheDocument();
   });
 
   it('shows client-side validation and server errors without leaving the page', async () => {

@@ -15,6 +15,8 @@ uvicorn>=0.29
 python-multipart>=0.0.9
 httpx>=0.27            # TestClient
 
+# confluent-kafka            # enrichment job queue (NP_BUS=kafka); tests use a fake
+
 # optional heavy backends - each is lazily imported; install what you use
 # rapidocr-onnxruntime        # CPU OCR for scanned pages (no system deps)
 # paddleocr                   # GPU OCR, Indic + English

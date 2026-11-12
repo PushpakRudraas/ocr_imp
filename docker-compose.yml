@@ -1,10 +1,37 @@
-# Whole stack:  docker compose up -d --build     ->  UI on http://localhost:8080
-# Infra only (for local dev / tests):  docker compose up -d mongo postgres neo4j
+# Whole stack:  docker compose up -d --build     ->  UI on http://localhost:${WEB_PORT:-8080}
+# Infra only (for local dev / tests):  docker compose up -d mongo postgres neo4j kafka
+#
+# Everything passes through Kafka (the api only serves HTTP and publishes jobs):
+#   api --jobs.extract--> extract-worker (PDF -> OCR + layout -> clean + translate)
+#   extract-worker --events.clean--> datasync --> MongoDB (pages, raw_events, clean_events)
+#   datasync --jobs.enrich--> enrich-worker (reads clean_events back, cluster + enrich)      [only if enrichment is on]
+#   enrich-worker --events.enriched--> datasync --> MongoDB (enriched_events)
+# datasync is the only service that writes pipeline documents to MongoDB. Enrichment is opt-in (UI toggle), so the slow
+# NLP models never block the upload.
 # Credentials come from .env (see .env.example); the defaults below are for local development only.
 name: newspaper
 
 x-restart: &restart
   restart: unless-stopped
+
+# api, extract-worker, datasync and enrich-worker share one image and the same wiring; each only uses its part of it
+x-pipeline-env: &pipeline-env
+  NP_WORKDIR: /data
+  NP_STORE: mongo
+  NP_MONGO_URI: mongodb://${MONGO_USER:-newspaper}:${MONGO_PASSWORD:-newspaper-dev}@mongo:27017/?authSource=admin
+  NP_MONGO_DB: newspaper
+  NP_INDEX: pgvector
+  NP_EMBED_DIM: "384"            # paraphrase-multilingual-MiniLM-L12-v2
+  NP_EMBEDDER: ${NP_EMBEDDER:-minilm}
+  NP_ENRICH_MODELS: ${NP_ENRICH_MODELS:-hf}
+  NP_PG_DSN: postgresql://${POSTGRES_USER:-newspaper}:${POSTGRES_PASSWORD:-newspaper-dev}@postgres:5432/${POSTGRES_DB:-newspaper}
+  NP_GRAPH: neo4j
+  NP_NEO4J_URI: bolt://neo4j:7687
+  NP_NEO4J_USER: neo4j
+  NP_NEO4J_PASSWORD: ${NEO4J_PASSWORD:-newspaper-dev}
+  NP_BUS: kafka
+  NP_KAFKA_BOOTSTRAP: kafka:9092
+  NP_KAFKA_TOPIC: ${NP_KAFKA_TOPIC:-newspaper.jobs.enrich}
 
 services:
   mongo:                       # raw events: pages, OCR articles (raw_events), clean_events, enriched_events, counters
@@ -61,25 +88,58 @@ services:
       retries: 30
       start_period: 20s
 
-  api:                         # FastAPI + the pipeline (OCR, clean, cluster, enrich)
+  kafka:                       # job queue between the two phases: "enrich this run" messages (single-node KRaft, no zookeeper)
+    <<: *restart
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+      KAFKA_MESSAGE_MAX_BYTES: 10485760          # enriched articles are far bigger than the 1 MB default
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 8s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  kafka-ui:
+    <<: *restart
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8081:8080"
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "false"
+      KAFKA_CLUSTERS_0_NAME: argus-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+
+  api:                         # FastAPI: accepts uploads, publishes jobs to Kafka, serves results. Does no pipeline work.
     <<: *restart
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
     environment:
-      NP_WORKDIR: /data
-      NP_STORE: mongo
-      NP_MONGO_URI: mongodb://${MONGO_USER:-newspaper}:${MONGO_PASSWORD:-newspaper-dev}@mongo:27017/?authSource=admin
-      NP_MONGO_DB: newspaper
-      NP_INDEX: pgvector
-      NP_EMBED_DIM: "384"            # paraphrase-multilingual-MiniLM-L12-v2
-      NP_EMBEDDER: ${NP_EMBEDDER:-minilm}
-      NP_ENRICH_MODELS: ${NP_ENRICH_MODELS:-hf}
-      NP_PG_DSN: postgresql://${POSTGRES_USER:-newspaper}:${POSTGRES_PASSWORD:-newspaper-dev}@postgres:5432/${POSTGRES_DB:-newspaper}
-      NP_GRAPH: neo4j
-      NP_NEO4J_URI: bolt://neo4j:7687
-      NP_NEO4J_USER: neo4j
-      NP_NEO4J_PASSWORD: ${NEO4J_PASSWORD:-newspaper-dev}
+      <<: *pipeline-env
       NP_OCR: ${NP_OCR:-auto}
       NP_TRANSLATOR: ${NP_TRANSLATOR:-aws}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -94,12 +154,81 @@ services:
       mongo: {condition: service_healthy}
       postgres: {condition: service_healthy}
       neo4j: {condition: service_healthy}
+      kafka: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/config', timeout=3).status == 200 else 1)"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 15s
+
+  extract-worker:              # phase 1: consumes jobs.extract -> OCR + layout -> clean + translate -> events.clean
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+    command: ["python", "-m", "newspaper_pipeline.worker", "extract"]
+    environment:
+      <<: *pipeline-env
+      NP_STORE: sqlite               # placeholder only: this worker publishes documents to Kafka, it never writes MongoDB
+      NP_OCR: ${NP_OCR:-auto}
+      NP_TRANSLATOR: ${NP_TRANSLATOR:-aws}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      - api-data:/data               # uploads in, runs/<id>/run.json progress out
+    depends_on:
+      kafka: {condition: service_healthy}
+
+  datasync:                    # the only writer of pipeline documents to MongoDB: events.clean / events.enriched -> collections
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+    command: ["python", "-m", "newspaper_pipeline.datasync"]
+    environment:
+      <<: *pipeline-env
+    volumes:
+      - api-data:/data               # marks runs done (and queues the enrichment job) once their documents are stored
+    depends_on:
+      mongo: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+
+  enrich-worker:               # phase 2: consumes jobs.enrich -> reads clean_events from MongoDB -> cluster + enrich -> events.enriched
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}
+    command: ["python", "-m", "newspaper_pipeline.worker", "enrich"]
+    environment:
+      <<: *pipeline-env
+      NP_TRANSLATOR: none            # translation already happened in phase 1; the stored clean events carry it
+      NP_OCR: none
+      NP_DEVICE: ${NP_DEVICE:-cuda}  # embedder + NLP models on the GPU; "cuda" fails loudly instead of silently using the CPU
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:                   # needs the NVIDIA driver on the host (+ NVIDIA Container Toolkit, or Docker Desktop's WSL2 GPU support)
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - api-data:/data               # runs/<id>/run.json: the worker reports enrichment progress here
+      - hf-models:/models
+    depends_on:
+      mongo: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      kafka: {condition: service_healthy}
 
   web:                         # nginx: the built Vite UI + reverse proxy to the API
     <<: *restart
@@ -116,3 +245,4 @@ volumes:
   neo4j-data:
   api-data:
   hf-models:
+  kafka-data:

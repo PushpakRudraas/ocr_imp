@@ -60,6 +60,27 @@ def review_items(docs: list[dict]) -> list[dict]:
     return items
 
 
+def clean_views(arts: list[dict]) -> list[dict]:
+    """Phase-1 view of the stored clean events: what OCR + cleaning + translation produced, before any enrichment."""
+    out = []
+    for a in arts:
+        text = a.get("translated_text") or a.get("text") or ""
+        out.append({
+            "event_id": a["event_id"], "paper": a.get("paper_name") or a["paper_id"], "paper_id": a["paper_id"],
+            "page_no": a.get("page_no"), "headline": a.get("headline", ""), "translated_headline": a.get("translated_headline"),
+            "byline": a.get("byline"), "language": a.get("detected_language") or a.get("language"),
+            "translation_status": a.get("translation_status"), "ocr_confidence": a.get("ocr_confidence"),
+            "status": a.get("status"), "chars": len(a.get("text") or ""), "excerpt": text[:400],
+            "exact_duplicate_of": a.get("exact_duplicate_of")})
+    out.sort(key=lambda v: (v["paper"], v["page_no"] or 0, v["event_id"]))
+    return out
+
+
+def export_clean(arts: list[dict], out_dir: str | Path) -> dict:
+    _dump(Path(out_dir) / "clean_articles.json", clean_views(arts))
+    return {"clean": len(arts)}
+
+
 def export_all(docs: list[dict], out_dir: str | Path, metrics: dict | None = None) -> dict:
     out = Path(out_dir)
     for d in docs:

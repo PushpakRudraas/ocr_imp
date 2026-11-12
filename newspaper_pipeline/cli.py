@@ -21,8 +21,12 @@ from .pipeline import Pipeline
 from .store import make_store
 
 
-def build_pipeline(args, settings: Settings, shared: dict | None = None) -> Pipeline:
-    """`shared` caches heavy models (OCR engine, translator, embedder) so a long-lived server loads them once."""
+def build_pipeline(args, settings: Settings, shared: dict | None = None, phase: str = "all") -> Pipeline:
+    """`shared` caches heavy models (OCR engine, translator, embedder) so a long-lived server loads them once.
+
+    `phase` loads only what that part of the flow needs: "extract" = OCR + translator + store (no embedder, NLP models,
+    vector index or graph), "enrich" = store + embedder + index + graph + NLP models (no OCR, no translator), "all" = both."""
+    extract, enrich = phase in ("all", "extract"), phase in ("all", "enrich")
     shared = shared if shared is not None else {}
     cached = lambda key, make: shared[key] if key in shared else shared.setdefault(key, make())
     from .cluster.clusterer import StoryClusterer
@@ -31,7 +35,9 @@ def build_pipeline(args, settings: Settings, shared: dict | None = None) -> Pipe
     from .cluster.scorer import LlmJudge, RuleScorer
 
     engine = None
-    if args.ocr == "rapidocr":
+    if not extract:
+        pass
+    elif args.ocr == "rapidocr":
         from .ocr.backends import RapidOcrEngine; engine = cached("ocr", RapidOcrEngine)
     elif args.ocr == "tesseract":
         from .ocr.backends import TesseractEngine; engine = cached("ocr", lambda: TesseractEngine(args.ocr_lang))
@@ -39,7 +45,9 @@ def build_pipeline(args, settings: Settings, shared: dict | None = None) -> Pipe
         from .ocr.backends import PaddleOcrEngine; engine = cached("ocr", lambda: PaddleOcrEngine(args.ocr_lang))
 
     translator = None
-    if args.translator == "aws":
+    if not extract:
+        pass
+    elif args.translator == "aws":
         from .clean.translate import AwsTranslateBackend; translator = cached("tr", AwsTranslateBackend)
     elif args.translator == "indictrans2":
         from .clean.translate import IndicTrans2Backend; translator = cached("tr", IndicTrans2Backend)
@@ -48,9 +56,16 @@ def build_pipeline(args, settings: Settings, shared: dict | None = None) -> Pipe
     index_backend = getattr(args, "index", None) or settings.index_backend
     graph_backend = getattr(args, "graph", None) or settings.graph_backend
     settings = dataclasses.replace(settings, store_backend=store_backend)
+    if not enrich:                         # extraction only reads PDFs and writes clean events: nothing below is needed
+        return Pipeline(settings, make_store(settings, shared), translator, engine)
     dim = settings.embed_dim
-    makers = {"bge-m3": SentenceTransformerEmbedder, "minilm": minilm_embedder}
-    embedder = cached(f"emb{args.embedder}{dim}", makers.get(args.embedder) or (lambda: HashingEmbedder(dim=dim)))
+    from .device import describe, resolve_device
+    device = resolve_device(getattr(args, "device", None))      # NP_DEVICE: auto | cuda (fail if no GPU) | cpu
+    if "device_logged" not in shared:
+        shared["device_logged"] = True
+        logging.getLogger("np.device").info("enrichment models run on: %s", describe(device))
+    makers = {"bge-m3": lambda: SentenceTransformerEmbedder(device=device), "minilm": lambda: minilm_embedder(device)}
+    embedder = cached(f"emb{args.embedder}{dim}{device}", makers.get(args.embedder) or (lambda: HashingEmbedder(dim=dim)))
     if index_backend == "pgvector":
         from .cluster.index import PgVectorIndex
         index = PgVectorIndex(settings.pg_dsn, embedder.dim)
@@ -67,11 +82,13 @@ def build_pipeline(args, settings: Settings, shared: dict | None = None) -> Pipe
 
     models = None
     if getattr(args, "models", "none") == "hf":
-        from .enrich.models import HfModels; models = cached("hf_models", HfModels)
+        from .enrich.models import HfModels; models = cached(f"hf_models{device}", lambda: HfModels(device=device))
     refiner = None
     if args.llm_refine:
         from .enrich.llm import LlmRefiner; refiner = LlmRefiner()
-    return Pipeline(settings, make_store(settings, shared), translator, engine, clusterer, refiner=refiner, graph=graph, models=models)
+    p = Pipeline(settings, make_store(settings, shared), translator, engine, clusterer, refiner=refiner, graph=graph, models=models)
+    p.device = device if (models is not None or args.embedder != "hashing") else "cpu"      # what the ML parts actually run on
+    return p
 
 
 def _common(p: argparse.ArgumentParser) -> None:
@@ -89,6 +106,8 @@ def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--graph", choices=["none", "neo4j"], default=None, help="default: NP_GRAPH or none")
     p.add_argument("--qdrant-path", default=None)
     p.add_argument("--judge", choices=["none", "claude"], default="none")
+    p.add_argument("--device", choices=["auto", "cuda", "cpu"], default=None,
+                   help="where the embedder / NLP models run (default: NP_DEVICE or auto = GPU if usable)")
     p.add_argument("--llm-refine", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
 
