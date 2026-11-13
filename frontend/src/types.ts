@@ -205,6 +205,7 @@ export interface Article {
   entities?: ArticleEntity[];
   geo?: { primary_location: string | null; country_iso?: string | null };
   dedup_clustering?: { matches?: MatchEdge[]; review_candidates?: MatchEdge[] };
+  ingestion_metadata?: { published_at?: string; published_precision?: string };
   newspaper: {
     paper: string;
     text: string;

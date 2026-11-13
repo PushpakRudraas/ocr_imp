@@ -1,13 +1,16 @@
 import { useState } from 'react';
-import { hasContext, percent, similarContext, type Pair, type SharedEntity } from '../lib/similar';
+import { articleDate, hasContext, percent, similarContext, type Pair, type SharedEntity } from '../lib/similar';
 import { humanize } from '../lib/guess';
 import type { Article } from '../types';
 import { Signals } from './MatchReasons';
 
 type Variant = 'cleaned' | 'original' | 'translated';
 
-function ArticleBox({ doc, role }: { doc: Article; role: string }) {
+const DATE_HINT = 'The date entered when this newspaper was uploaded';
+
+function ArticleBox({ doc, role, runDate }: { doc: Article; role: string; runDate?: string }) {
   const n = doc.newspaper;
+  const date = articleDate(doc, runDate);
   const variants: [Variant, string, string][] = [['cleaned', 'Cleaned text', n.text || '']];
   if (n.original_text && n.original_text !== n.text) variants.push(['original', 'Original OCR text', n.original_text]);
   if (n.translated_text) variants.push(['translated', 'English translation', n.translated_text]);
@@ -22,9 +25,14 @@ function ArticleBox({ doc, role }: { doc: Article; role: string }) {
       <header>
         <span className="muted small">{role}</span>
         <h4 style={{ margin: '.1rem 0' }}>{n.paper}</h4>
-        <p className="muted small">
-          {n.page_no != null && <>page {n.page_no}</>}{n.language && <> - {n.language}</>}{n.section && <> - {n.section}</>}{n.byline && <> - by {n.byline}</>}
-        </p>
+        <dl className="sim-meta">
+          <div><dt>Newspaper</dt><dd>{n.paper}</dd></div>
+          <div><dt>Date</dt><dd title={DATE_HINT}>{date ?? 'not recorded'}</dd></div>
+          {n.page_no != null && <div><dt>Page</dt><dd>{n.page_no}</dd></div>}
+          {n.section && <div><dt>Section</dt><dd>{n.section}</dd></div>}
+          {n.language && <div><dt>Language</dt><dd>{n.language}</dd></div>}
+          {n.byline && <div><dt>By</dt><dd>{n.byline}</dd></div>}
+        </dl>
         <p className="small">
           Event ID: <code className="event-id">{doc.event_id}</code>{' '}
           <button type="button" className="link-btn" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
@@ -60,11 +68,17 @@ function groupEntities(list: SharedEntity[]): [string, SharedEntity[]][] {
 const TYPE_LABEL: Record<string, string> = { PERSON: 'People', ORG: 'Organisations', GPE: 'Places' };
 
 /** Two articles side by side with the engine's similarity score and the context they share (computed from the stored articles). */
-export default function SimilarPair({ pair, a, b }: { pair: Pair; a: Article; b: Article }) {
+export default function SimilarPair({ pair, a, b, runDate }: { pair: Pair; a: Article; b: Article; runDate?: string }) {
   const ctx = similarContext(a, b);
   const e = pair.edge;
+  const da = articleDate(a, runDate), db = articleDate(b, runDate);
   return (
     <div className="sim-pair stack" role="group" aria-label={`Similar articles ${a.newspaper.paper} and ${b.newspaper.paper}`}>
+      <p className="sim-compare" aria-label="Newspapers compared">
+        <strong>{a.newspaper.paper}</strong>{da && <span className="muted" title={DATE_HINT}> ({da})</span>}
+        <span className="muted"> compared with </span>
+        <strong>{b.newspaper.paper}</strong>{db && <span className="muted" title={DATE_HINT}> ({db})</span>}
+      </p>
       <section className="sim-verdict" aria-label="Similarity">
         <span className="sim-pct" aria-label={`Similarity ${percent(pair.score)}`}>{percent(pair.score)}</span>
         <div>
@@ -78,8 +92,8 @@ export default function SimilarPair({ pair, a, b }: { pair: Pair; a: Article; b:
       </section>
 
       <div className="sim-cols">
-        <ArticleBox doc={a} role="Article A" />
-        <ArticleBox doc={b} role="Article B" />
+        <ArticleBox doc={a} role="Article A" runDate={runDate} />
+        <ArticleBox doc={b} role="Article B" runDate={runDate} />
       </div>
 
       <section className="sim-context card" aria-label="Similar context">

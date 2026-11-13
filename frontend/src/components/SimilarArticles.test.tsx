@@ -154,6 +154,48 @@ describe('SimilarArticles', () => {
     expect(ctx.textContent).not.toMatch(/Gurwinder AfridiPunjab|EthiopiaPunjab/);
   });
 
+  it('shows the newspaper name and its date on every row of the list, and on the possible matches', () => {
+    render(<SimilarArticles runId="r1" stories={[matchedStory, solo]} runDate="2026-11-14" />);
+    const card = screen.getAllByRole('listitem').find((li) => li.classList.contains('sim-card'))!;
+    expect(within(card).getByText('Hindustan Times')).toBeInTheDocument();
+    expect(within(card).getByText('The Times of India')).toBeInTheDocument();
+    expect(within(card).getAllByText('14 Nov 2026')).toHaveLength(2);                      // one date next to each newspaper
+    expect(card.textContent).toMatch(/Hindustan Times\s+14 Nov 2026/);                    // written with a space, so it reads and copies correctly
+    expect(card.textContent).toMatch(/The Times of India\s+14 Nov 2026/);
+    const possible = within(screen.getByRole('region', { name: 'Possible matches' }));
+    expect(possible.getByText('Hindustan Times')).toBeInTheDocument();
+    expect(possible.getByText('The Times of India')).toBeInTheDocument();
+    expect(possible.getAllByText('14 Nov 2026')).toHaveLength(2);                           // a date beside each of the two newspapers
+  });
+
+  it('names both newspapers with their dates above the comparison and in a labelled Newspaper / Date row on each article', async () => {
+    const u = userEvent.setup();
+    render(<SimilarArticles runId="r1" stories={[matchedStory]} runDate="2026-11-14" />);
+    await u.click(screen.getByRole('button', { name: /2 similar articles/ }));
+    const line = await screen.findByLabelText('Newspapers compared');
+    expect(line).toHaveTextContent('Hindustan Times (14 Nov 2026) compared with The Times of India (14 Nov 2026)');
+    for (const [role, paper] of [[/Article A/, 'Hindustan Times'], [/Article B/, 'The Times of India']] as const) {
+      const box = within(screen.getByRole('article', { name: role }));
+      expect(box.getByText('Newspaper').nextSibling).toHaveTextContent(paper);
+      expect(box.getByText('Date').nextSibling).toHaveTextContent('14 Nov 2026');
+      expect(box.getByText('Page').nextSibling).toHaveTextContent('6');
+    }
+  });
+
+  it("prefers an article's own saved date, and says 'not recorded' when there is no date at all", async () => {
+    m.getArticle.mockImplementation(async (_r, id) => id === A
+      ? doc(A, 'Hindustan Times', 'Gangster brought back from Ethiopia', HT_TEXT, { ingestion_metadata: { published_at: '2026-11-13T00:00:00Z' } })
+      : doc(B, 'The Times of India', 'Wanted Punjab gangster brought back', TOI_TEXT, { dedup_clustering: { matches: [{ event_id: A, score: 0.8, components: comps }] } }));
+    const u = userEvent.setup();
+    render(<SimilarArticles runId="r1" stories={[matchedStory]} />);                       // no run date given
+    await u.click(screen.getByRole('button', { name: /2 similar articles/ }));
+    const a = within(await screen.findByRole('article', { name: /Article A/ }));
+    const b = within(screen.getByRole('article', { name: /Article B/ }));
+    expect(a.getByText('Date').nextSibling).toHaveTextContent('13 Nov 2026');
+    expect(b.getByText('Date').nextSibling).toHaveTextContent('not recorded');
+    expect(screen.getByLabelText('Newspapers compared')).toHaveTextContent('Hindustan Times (13 Nov 2026) compared with The Times of India');
+  });
+
   it('shows an error when an article cannot be loaded', async () => {
     m.getArticle.mockRejectedValue(new api.ApiError('unknown article', 404));
     const u = userEvent.setup();

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Article, Story } from '../types';
-import { hasContext, matchedPairs, pairKey, percent, possiblePairs, sharedEntities, sharedNumbers, sharedWords, similarContext, similarPassages } from './similar';
+import { articleDate, formatDate, hasContext, matchedPairs, pairKey, percent, possiblePairs, sharedEntities, sharedNumbers, sharedWords, similarContext, similarPassages } from './similar';
 
 const doc = (id: string, over: Partial<Article> = {}, text = 'Plain text.'): Article => ({
   event_id: id, event: { type: 'Crime.Arrest', trigger: 'arrested', actor: null, institution: null, date: '2026-11-08', confidence: 'medium' },
@@ -82,5 +82,22 @@ describe('similar context (computed from the stored articles)', () => {
     const none = similarContext(doc('X', { event: { type: 'Sports.Win', trigger: '', actor: null, institution: null, date: '', confidence: '' } }, 'Alpha beta.'), doc('Y', { geo: { primary_location: 'Goa' } }, 'Gamma delta.'));
     expect(none.eventType?.same).toBe(false);
     expect(hasContext(none)).toBe(false);
+  });
+});
+
+describe('newspaper dates', () => {
+  it('formats saved dates plainly, with or without a time part, and leaves anything else alone', () => {
+    expect(formatDate('2026-11-14')).toBe('14 Nov 2026');
+    expect(formatDate('2026-03-05T00:00:00Z')).toBe('5 Mar 2026');
+    expect(formatDate('sometime')).toBe('sometime');
+    expect(formatDate('2026-13-01')).toBe('2026-13-01');
+    expect(formatDate('')).toBeNull();
+    expect(formatDate(undefined)).toBeNull();
+  });
+
+  it("uses the article's own saved date, falls back to the date of the run, and is null when neither exists", () => {
+    expect(articleDate(doc('A', { ingestion_metadata: { published_at: '2026-11-13T00:00:00Z' } }), '2026-11-14')).toBe('13 Nov 2026');
+    expect(articleDate(doc('A'), '2026-11-14')).toBe('14 Nov 2026');
+    expect(articleDate(doc('A'))).toBeNull();
   });
 });

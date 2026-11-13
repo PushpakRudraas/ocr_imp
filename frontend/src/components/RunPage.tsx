@@ -145,7 +145,7 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
           {active === 'ocr' && (ocr ? <OcrResults runId={run.id} items={ocr} locked={run.enrichment.state !== 'off' && run.enrichment.state !== 'failed'} /> : ocrError ? <p className="notice warn">{ocrError}</p> : <p className="empty">Loading OCR results...</p>)}
           {active === 'pages' && pageInfo && ocr && <PageView runId={run.id} pages={pageInfo} items={ocr} />}
           {active === 'stories' && enriched && stories && <StoriesView runId={run.id} stories={stories} />}
-          {active === 'similar' && enriched && stories && <SimilarArticles runId={run.id} stories={stories} />}
+          {active === 'similar' && enriched && stories && <SimilarArticles runId={run.id} stories={stories} runDate={run.run_date} />}
           {active === 'review' && enriched && <ReviewTable items={review} />}
         </>
       )}

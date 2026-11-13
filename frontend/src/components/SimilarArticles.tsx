@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ApiError, getArticle } from '../api';
-import { matchedPairs, percent, possiblePairs, type Pair } from '../lib/similar';
+import { formatDate, matchedPairs, percent, possiblePairs, type Pair } from '../lib/similar';
 import type { Article, Coverage, Story } from '../types';
 import SimilarPair from './SimilarPair';
 
@@ -26,7 +26,7 @@ function useArticles(runId: string, ids: string[], enabled: boolean) {
   return { docs, error };
 }
 
-function GroupCard({ runId, story }: { runId: string; story: Story }) {
+function GroupCard({ runId, story, runDate }: { runId: string; story: Story; runDate?: string }) {
   const [open, setOpen] = useState(false);
   const { docs, error } = useArticles(runId, story.coverage.map((c) => c.event_id), open);
   const pairs = useMemo(() => (docs ? matchedPairs(docs) : []), [docs]);
@@ -41,7 +41,11 @@ function GroupCard({ runId, story }: { runId: string; story: Story }) {
           <span className="muted small"> - story {story.story_id}</span>
           <ul className="sim-heads">
             {story.coverage.map((c) => (
-              <li key={c.event_id}><span className="chip">{c.paper}</span> {headlineOf(c)} <code className="event-id muted small">{shortId(c.event_id)}</code></li>
+              <li key={c.event_id}>
+                <span className="chip">{c.paper}</span>{' '}
+                {formatDate(runDate) && <span className="muted small" title="The date entered when this newspaper was uploaded">{formatDate(runDate)} </span>}
+                {headlineOf(c)} <code className="event-id muted small">{shortId(c.event_id)}</code>
+              </li>
             ))}
           </ul>
         </span>
@@ -53,7 +57,7 @@ function GroupCard({ runId, story }: { runId: string; story: Story }) {
           {!docs && !error && <p className="muted small">Loading the complete articles...</p>}
           {docs && pairs.length > 0 && pairs.map((p) => {
             const a = byId.get(p.a), b = byId.get(p.b);
-            return a && b ? <SimilarPair key={p.key} pair={p} a={a} b={b} /> : null;
+            return a && b ? <SimilarPair key={p.key} pair={p} a={a} b={b} runDate={runDate} /> : null;
           })}
           {docs && pairs.length === 0 && (
             <>
@@ -76,7 +80,9 @@ function GroupCard({ runId, story }: { runId: string; story: Story }) {
   );
 }
 
-function PossibleCard({ runId, pair, label }: { runId: string; pair: Pair; label: [string, string] }) {
+type Side = { paper: string; headline: string };
+
+function PossibleCard({ runId, pair, sides, runDate }: { runId: string; pair: Pair; sides: [Side, Side]; runDate?: string }) {
   const [open, setOpen] = useState(false);
   const { docs, error } = useArticles(runId, [pair.a, pair.b], open);
   return (
@@ -84,7 +90,13 @@ function PossibleCard({ runId, pair, label }: { runId: string; pair: Pair; label
       <button type="button" className="sim-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span className="sim-pct small-pct">{percent(pair.score)}</span>
         <span className="sim-toggle-body">
-          <strong>{label[0]}</strong> <span className="muted">and</span> <strong>{label[1]}</strong>
+          {sides.map((s, i) => (
+            <span key={i} className="sim-side">
+              <span className="chip">{s.paper}</span>{' '}
+              {formatDate(runDate) && <span className="muted small" title="The date entered when this newspaper was uploaded">{formatDate(runDate)} </span>}
+              <strong>{s.headline}</strong>{i === 0 && <span className="muted"> and </span>}
+            </span>
+          ))}
           <span className="chip warn">not merged</span>
           <span className="muted small"> <code className="event-id">{shortId(pair.a)}</code> / <code className="event-id">{shortId(pair.b)}</code></span>
         </span>
@@ -94,7 +106,7 @@ function PossibleCard({ runId, pair, label }: { runId: string; pair: Pair; label
         <div className="sim-body stack">
           {error && <p className="notice error" role="alert">{error}</p>}
           {!docs && !error && <p className="muted small">Loading the complete articles...</p>}
-          {docs && docs.length === 2 && <SimilarPair pair={pair} a={docs[0]} b={docs[1]} />}
+          {docs && docs.length === 2 && <SimilarPair pair={pair} a={docs[0]} b={docs[1]} runDate={runDate} />}
         </div>
       )}
     </li>
@@ -103,7 +115,7 @@ function PossibleCard({ runId, pair, label }: { runId: string; pair: Pair; label
 
 /** The "Similar articles" tab: which articles the matching engine found to be about the same event, with their event IDs, the complete
  *  articles, the similarity score and the context they share. Reads only what the app already stores; nothing here changes any data. */
-export default function SimilarArticles({ runId, stories }: { runId: string; stories: Story[] }) {
+export default function SimilarArticles({ runId, stories, runDate }: { runId: string; stories: Story[]; runDate?: string }) {
   const [query, setQuery] = useState('');
   const [paper, setPaper] = useState('');
   const [minScore, setMinScore] = useState(0);
@@ -111,12 +123,13 @@ export default function SimilarArticles({ runId, stories }: { runId: string; sto
 
   const groups = useMemo(() => stories.filter((s) => s.n_papers >= 2).sort((x, y) => bestScore(y) - bestScore(x)), [stories]);
   const possible = useMemo(() => possiblePairs(stories), [stories]);
-  const labels = useMemo(() => {
-    const m = new Map<string, string>();
-    stories.forEach((s) => s.coverage.forEach((c) => m.set(c.event_id, `${c.paper}: ${headlineOf(c)}`)));
-    stories.forEach((s) => (s.possible_matches ?? []).forEach((p) => { if (!m.has(p.event_id)) m.set(p.event_id, `${p.paper}: ${p.headline}`); }));
+  const sides = useMemo(() => {
+    const m = new Map<string, Side>();
+    stories.forEach((s) => s.coverage.forEach((c) => m.set(c.event_id, { paper: c.paper, headline: headlineOf(c) })));
+    stories.forEach((s) => (s.possible_matches ?? []).forEach((p) => { if (!m.has(p.event_id)) m.set(p.event_id, { paper: p.paper, headline: p.headline }); }));
     return m;
   }, [stories]);
+  const sideOf = (id: string): Side => sides.get(id) ?? { paper: 'Unknown newspaper', headline: shortId(id) };
   const papers = useMemo(() => [...new Set(stories.flatMap((s) => s.coverage.map((c) => c.paper)))].sort(), [stories]);
 
   const q = query.trim().toLowerCase();
@@ -125,8 +138,8 @@ export default function SimilarArticles({ runId, stories }: { runId: string; sto
     bestScore(s) * 100 >= minScore && (!paper || s.coverage.some((c) => c.paper === paper)) &&
     (!q || s.coverage.some((c) => matches(`${c.headline} ${c.translated_headline ?? ''} ${c.paper} ${c.event_id}`)) || matches(s.story_id)));
   const shownPossible = possible.filter((p) =>
-    p.score * 100 >= minScore && (!paper || (labels.get(p.a) ?? '').startsWith(paper) || (labels.get(p.b) ?? '').startsWith(paper)) &&
-    (!q || matches(`${labels.get(p.a) ?? ''} ${labels.get(p.b) ?? ''} ${p.a} ${p.b}`)));
+    p.score * 100 >= minScore && (!paper || sideOf(p.a).paper === paper || sideOf(p.b).paper === paper) &&
+    (!q || matches(`${sideOf(p.a).paper} ${sideOf(p.a).headline} ${sideOf(p.b).paper} ${sideOf(p.b).headline} ${p.a} ${p.b}`)));
 
   return (
     <div className="stack">
@@ -157,7 +170,7 @@ export default function SimilarArticles({ runId, stories }: { runId: string; sto
         {groups.length === 0
           ? <p className="empty">No similar articles were found across the uploaded newspapers.</p>
           : shownGroups.length === 0 ? <p className="empty">Nothing matches these filters.</p>
-          : <ul className="stack sim-list">{shownGroups.map((s) => <GroupCard key={s.story_id} runId={runId} story={s} />)}</ul>}
+          : <ul className="stack sim-list">{shownGroups.map((s) => <GroupCard key={s.story_id} runId={runId} story={s} runDate={runDate} />)}</ul>}
       </section>
 
       {possible.length > 0 && (
@@ -165,7 +178,7 @@ export default function SimilarArticles({ runId, stories }: { runId: string; sto
           <h3>Possible matches - please check ({shownPossible.length})</h3>
           <p className="muted small">Close, but not close enough for the engine to merge them. Open one to compare.</p>
           <ul className="stack sim-list">
-            {(showAllPossible ? shownPossible : shownPossible.slice(0, POSSIBLE_LIMIT)).map((p) => <PossibleCard key={p.key} runId={runId} pair={p} label={[labels.get(p.a) ?? shortId(p.a), labels.get(p.b) ?? shortId(p.b)]} />)}
+            {(showAllPossible ? shownPossible : shownPossible.slice(0, POSSIBLE_LIMIT)).map((p) => <PossibleCard key={p.key} runId={runId} pair={p} sides={[sideOf(p.a), sideOf(p.b)]} runDate={runDate} />)}
           </ul>
           {shownPossible.length > POSSIBLE_LIMIT && (
             <button type="button" className="link-btn" onClick={() => setShowAllPossible((v) => !v)}>

@@ -10,6 +10,21 @@ export interface Pair {
   kind: 'matched' | 'possible';
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "2026-11-14" or "2026-11-14T00:00:00Z" -> "14 Nov 2026"; other text is shown as it is; nothing -> null. */
+export function formatDate(value?: string | null): string | null {
+  if (!value) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  const month = m ? MONTHS[Number(m[2]) - 1] : undefined;
+  return m && month ? `${Number(m[3])} ${month} ${m[1]}` : value;
+}
+
+/** The newspaper's date: the article's own saved date, else the date entered for the run. (The date is the one entered at upload;
+ *  the system does not read a printed date from the PDF.) */
+export function articleDate(doc: Article, runDate?: string | null): string | null {
+  return formatDate(doc.ingestion_metadata?.published_at) ?? formatDate(runDate);
+}
+
 export const pairKey = (a: string, b: string) => [a, b].sort().join('|');
 export const percent = (score: number) => `${Math.round(score * 100)}%`;
 
