@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +6,7 @@ import * as api from '../api';
 import { article, caps, cleanArticle, enrichment, run, solo, story, storyGraph } from '../test/fixtures';
 import RunPage from './RunPage';
 
-vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()), getRun: vi.fn(), getClean: vi.fn(), enrichRun: vi.fn(), getConfig: vi.fn(), getStories: vi.fn(), getReview: vi.fn(), getArticle: vi.fn(), getStoryGraph: vi.fn() }));
+vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()), getRun: vi.fn(), getClean: vi.fn(), getOcr: vi.fn(), getPages: vi.fn(), enrichRun: vi.fn(), getConfig: vi.fn(), getStories: vi.fn(), getReview: vi.fn(), getArticle: vi.fn(), getStoryGraph: vi.fn() }));
 const m = vi.mocked(api);
 
 const setup = () => render(
@@ -18,6 +18,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   m.getConfig.mockResolvedValue(caps);
   m.getClean.mockResolvedValue([cleanArticle(), cleanArticle({ event_id: 'd'.repeat(16), paper: 'Dainik Jagran', headline: 'पंजाब विधायक', translated_headline: 'Punjab MLA (en)', language: 'hi', translation_status: 'translated' })]);
+  m.getOcr.mockResolvedValue([
+    { article_id: 'a1', paper: 'The Tribune', paper_id: 't', page_no: 1, headline: 'Top story', byline: null, language: 'en', ocr_confidence: 0.99, status: 'ok', quality_issues: [], flags: [], chars: 40, text: 'Full text of the top story.', bboxes: [[10, 10, 200, 100]], ad_label: 'news', ad_reason: 'ok', ad_score: 0, kept: true, removed_reason: null, duplicate_of: null },
+    { article_id: 'a2', paper: 'The Tribune', paper_id: 't', page_no: 1, headline: 'SALE 50% OFF', byline: null, language: 'en', ocr_confidence: 0.71, status: 'review', quality_issues: ['low_confidence'], flags: [], chars: 20, text: 'Big sale this week', bboxes: [[10, 420, 190, 480]], ad_label: 'ad', ad_reason: 'ad_wording', ad_score: 3.5, kept: false, removed_reason: 'short_text', duplicate_of: null },
+  ]);
+  m.getPages.mockResolvedValue([{ paper_id: 't', page_no: 1, width: 500, height: 800, yolo: true, ad_conf: 0.25, layout: true, regions: [{ id: 0, label: 'ad', conf: 0.9, bbox: [10, 400, 200, 600] }, { id: 1, label: 'ad', conf: 0.1, bbox: [300, 400, 400, 500] }], blocks: [{ id: 0, cls: 'plain text', conf: 0.9, bbox: [20, 410, 180, 590] }, { id: 1, cls: 'title', conf: 0.9, bbox: [20, 20, 200, 80] }] }]);
   m.getReview.mockResolvedValue([]);
   m.getStories.mockResolvedValue([story, solo]);
   m.getArticle.mockResolvedValue(article());
@@ -43,6 +48,48 @@ describe('RunPage', () => {
     const calls = m.getRun.mock.calls.length;
     await new Promise((r) => setTimeout(r, 30));
     expect(m.getRun.mock.calls.length).toBe(calls);                         // polling stopped
+  });
+
+  it('lists every OCR result in order, including items the clean step dropped', async () => {
+    m.getRun.mockResolvedValue(run());
+    const u = userEvent.setup();
+    setup();
+    await u.click(await screen.findByRole('tab', { name: /All OCR results \(2\)/ }));
+    const rows = within(screen.getByRole('table', { name: 'All OCR results' })).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Top story');
+    expect(rows[1]).toHaveTextContent('SALE 50% OFF');
+    expect(rows[1]).toHaveTextContent(/dropped: Short text/i);
+    expect(rows[1]).toHaveTextContent('71%');
+    await u.click(screen.getByRole('button', { name: /Ads \(1\)/ }));
+    expect(within(screen.getByRole('table', { name: 'All OCR results' })).getAllByRole('row')).toHaveLength(2);
+    expect(screen.getByRole('table', { name: 'All OCR results' })).toHaveTextContent('Ad');
+  });
+
+  it('shows the page with the ignored ads, lets you adjust them and explains a clicked block', async () => {
+    m.getRun.mockResolvedValue(run());
+    const u = userEvent.setup();
+    setup();
+    await u.click(await screen.findByRole('tab', { name: /Page view/ }));
+    expect(screen.getByLabelText('Page summary')).toHaveTextContent(/1 ad ignored on this page/);
+    expect(screen.getByLabelText('Ignored parts')).toHaveTextContent(/90% confidence - 1 block/);
+    expect(screen.getByLabelText('Ignored parts')).toHaveTextContent(/1 OCR item inside/);
+    expect(screen.getByRole('img', { name: /page 1/ })).toHaveAttribute('src', expect.stringContaining('/pages/t/1/image'));
+    // the low-confidence candidate only shows when the slider is lowered (preview only)
+    fireEvent.change(screen.getByLabelText('Ad confidence'), { target: { value: '0.1' } });
+    expect(screen.getByLabelText('Page summary')).toHaveTextContent(/2 ads ignored on this page/);
+    // clicking the block that is part of the ad takes it out of the ad, dismissing the region removes it
+    await u.click(screen.getByRole('button', { name: 'Remove ad 1' }));
+    expect(screen.getByLabelText('Page summary')).toHaveTextContent(/1 ad ignored on this page/);
+    // preview without ads
+    await u.click(screen.getByRole('button', { name: 'Without ads' }));
+    expect(screen.getByText(/Preview of the page with the ads blanked out/)).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Detect' }));
+    await u.click(screen.getByLabelText(/Show OCR articles/));
+    const overlay = screen.getByLabelText('Page overlay');
+    const dashed = [...overlay.querySelectorAll('rect')].filter((r) => r.getAttribute('stroke-dasharray') === '3 2');
+    await u.click(dashed[0]);
+    expect(await screen.findByLabelText('Selected block')).toHaveTextContent(/Top story|SALE 50% OFF/);
   });
 
   it('shows the failure reason and stops polling', async () => {

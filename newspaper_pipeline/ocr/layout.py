@@ -36,6 +36,22 @@ def _x_overlap(a: Block, b: Block, tol: float = 4.0) -> bool:
     return a.x0 - tol <= b.x1 and b.x0 - tol <= a.x1
 
 
+def attach_drop_caps(blocks: list[Block]) -> list[Block]:
+    """A drop cap is a lone big capital printed beside the first lines of a story ("T" of "Tighter ..."). It arrives as a block
+    of its own, so the headline / paragraph next to it starts with a missing letter ("ighter appellate load"). Put it back."""
+    out = list(blocks)
+    for c in [b for b in blocks if b.kind != IMAGE and len(b.text.strip()) == 1 and b.text.strip().isalpha()]:
+        near = [b for b in out if b is not c and b.kind != IMAGE and b.text[:1].islower()
+                and -3 <= b.x0 - c.x1 <= max(14.0, c.width * 1.5) and c.y0 - 4 <= b.y0 <= c.y1 + 4]
+        if not near:
+            continue
+        tgt = min(near, key=lambda b: (b.x0 - c.x1, b.y0))
+        tgt.text = c.text.strip() + tgt.text
+        tgt.bbox = (min(tgt.x0, c.x0), min(tgt.y0, c.y0), max(tgt.x1, c.x1), max(tgt.y1, c.y1))
+        out.remove(c)
+    return out
+
+
 def classify_blocks(blocks: list[Block], page: PageRecord, top_frac: float = 0.07, bottom_frac: float = 0.04,
                     headline_ratio: float = 1.35) -> float:
     """Sets Block.kind in place; returns the body font size used."""
@@ -47,7 +63,8 @@ def classify_blocks(blocks: list[Block], page: PageRecord, top_frac: float = 0.0
         if b.kind == IMAGE:
             continue
         flat = " ".join(b.text.split())
-        if (b.y1 <= top_y or b.y0 >= bottom_y) and b.n_lines <= 2:
+        big_sentence = b.font_size >= body * headline_ratio and len(flat.split()) >= 4 and "|" not in flat             and any(ch.islower() for ch in flat)          # a headline that starts near the top edge is not a running head
+        if (b.y1 <= top_y or b.y0 >= bottom_y) and b.n_lines <= 2 and not big_sentence:
             b.kind = FURNITURE
         elif PAGE_NUM_RE.match(flat):
             b.kind = FURNITURE
@@ -121,7 +138,7 @@ def segment_articles(blocks: list[Block], page: PageRecord, tol: float = 8.0) ->
                     break
 
     chars = sum(len(b.text) for b in orphans if b.kind == BODY)
-    if orphans and chars >= 300:
+    if orphans and chars >= 80:      # short ones become 'no_headline' records; the clean filter drops them WITH a reason
         arts.append(Article(page.paper_id, page.page_no, headline_block=None, blocks=orphans, pages=[page.page_no],
                             flags=["no_headline"]))
     return arts

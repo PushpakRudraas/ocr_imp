@@ -9,11 +9,13 @@ COPY requirements-services.txt .
 # ones; the same wheel runs on the CPU when a container gets no GPU. Build a smaller CPU-only image with
 #   docker compose build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
-RUN pip install --default-timeout=300 --retries 10 torch --index-url ${TORCH_INDEX}
+RUN pip install --default-timeout=300 --retries 10 torch torchvision --index-url ${TORCH_INDEX}
 RUN pip install -r requirements-services.txt
 COPY newspaper_pipeline ./newspaper_pipeline
+# ad_yolo.pt (YOLO ad/article detector) and doclayout.pt (page layout blocks): see models/README.md
+COPY models ./models
 RUN useradd --create-home --uid 10001 app && mkdir /data /models && chown app /data /models
-ENV HF_HOME=/models
+ENV HF_HOME=/models NP_AD_MODEL=/app/models/ad_yolo.pt NP_LAYOUT_MODEL=/app/models/doclayout.pt
 USER app
 EXPOSE 8000
 CMD ["uvicorn", "newspaper_pipeline.api.server:app", "--host", "0.0.0.0", "--port", "8000"]

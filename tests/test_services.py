@@ -54,7 +54,7 @@ def groups(docs_):
 def test_compose_defines_the_whole_stack():
     c = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
     svc = c["services"]
-    assert set(svc) == {"mongo", "postgres", "neo4j", "kafka", "api", "extract-worker", "datasync", "enrich-worker", "web"}
+    assert set(svc) == {"mongo", "postgres", "neo4j", "kafka", "api", "extract-worker", "datasync", "enrich-worker", "web", "kafka-ui"}
     assert svc["postgres"]["image"].startswith("pgvector/pgvector")
     assert svc["mongo"]["image"].startswith("mongo:") and svc["neo4j"]["image"].startswith("neo4j:")
     for name in ("mongo", "postgres", "neo4j", "kafka", "api"):

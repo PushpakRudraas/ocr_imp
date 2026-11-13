@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ApiError, enrichRun, getClean, getConfig, getReview, getRun, getStories } from '../api';
-import type { CleanArticle, ReviewItem, Run, Story } from '../types';
+import { ApiError, enrichRun, getClean, getConfig, getOcr, getPages, getReview, getRun, getStories } from '../api';
+import type { CleanArticle, OcrArticle, PageInfo, ReviewItem, Run, Story } from '../types';
 import CleanArticles from './CleanArticles';
 import EnrichmentPanel from './EnrichmentPanel';
 import MetricsBar from './MetricsBar';
+import OcrResults from './OcrResults';
+import PageView from './PageView';
 import ReviewTable from './ReviewTable';
 import StagesStepper from './StagesStepper';
 import StoriesView from './StoriesView';
 
 const DEFAULT_STAGES = ['ingest', 'ocr', 'clean'];       // the server sends the real list (with 'queued' and 'store' when Kafka is on)
 const DEFAULT_ENRICH_STAGES = ['cluster', 'enrich', 'export'];
-type Tab = 'articles' | 'stories' | 'review';
+type Tab = 'articles' | 'ocr' | 'pages' | 'stories' | 'review';
 
 export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const { runId = '' } = useParams();
@@ -20,6 +22,9 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const [enrichStages, setEnrichStages] = useState(DEFAULT_ENRICH_STAGES);
   const [bus, setBus] = useState<'kafka' | 'inline'>('inline');
   const [clean, setClean] = useState<CleanArticle[] | null>(null);
+  const [ocr, setOcr] = useState<OcrArticle[] | null>(null);
+  const [pageInfo, setPageInfo] = useState<PageInfo[] | null>(null);
+  const [ocrError, setOcrError] = useState<string | null>(null);
   const [stories, setStories] = useState<Story[] | null>(null);
   const [review, setReview] = useState<ReviewItem[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -27,13 +32,13 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [pollKey, setPollKey] = useState(0);                      // bump to restart polling (e.g. after switching enrichment on)
-  const loaded = useRef({ clean: false, results: false });
+  const loaded = useRef({ clean: false, ocr: false, results: false });
 
   useEffect(() => {
     getConfig().then((c) => { setStages(c.stages); setEnrichStages(c.enrich_stages ?? DEFAULT_ENRICH_STAGES); setBus(c.enrichment_bus ?? 'inline'); }).catch(() => undefined);
   }, []);
 
-  useEffect(() => { loaded.current = { clean: false, results: false }; setClean(null); setStories(null); setReview([]); setTab(null); }, [runId]);
+  useEffect(() => { loaded.current = { clean: false, ocr: false, results: false }; setClean(null); setOcr(null); setPageInfo(null); setOcrError(null); setStories(null); setReview([]); setTab(null); }, [runId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +51,12 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
         if (r.status === 'done' && !loaded.current.clean) {          // phase 1 finished: the cleaned articles are readable now
           loaded.current.clean = true;
           getClean(runId).then((c) => { if (!cancelled) setClean(c); }).catch(() => { loaded.current.clean = false; });
+        }
+        if (r.status === 'done' && !loaded.current.ocr) {
+          loaded.current.ocr = true;
+          getPages(runId).then((p) => { if (!cancelled) setPageInfo(p); }).catch(() => undefined);
+          getOcr(runId).then((o) => { if (!cancelled) setOcr(o); })
+            .catch((e) => { if (!cancelled) setOcrError(e instanceof ApiError ? e.message : 'Could not load the OCR results.'); });
         }
         if (r.status === 'done' && r.enrichment.state === 'done' && !loaded.current.results) {
           loaded.current.results = true;
@@ -117,6 +128,8 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
           )}
           <div className="tabs" role="tablist">
             <button role="tab" aria-selected={active === 'articles'} onClick={() => setTab('articles')}>Articles{clean ? ` (${clean.length})` : ''}</button>
+            <button role="tab" aria-selected={active === 'ocr'} onClick={() => setTab('ocr')}>All OCR results{ocr ? ` (${ocr.length})` : ''}</button>
+            {pageInfo && <button role="tab" aria-selected={active === 'pages'} onClick={() => setTab('pages')}>Page view</button>}
             {enriched && stories && (
               <>
                 <button role="tab" aria-selected={active === 'stories'} onClick={() => setTab('stories')}>Stories ({stories.length})</button>
@@ -125,6 +138,8 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
             )}
           </div>
           {active === 'articles' && (clean ? <CleanArticles items={clean} /> : <p className="empty">Loading articles...</p>)}
+          {active === 'ocr' && (ocr ? <OcrResults runId={run.id} items={ocr} locked={run.enrichment.state !== 'off' && run.enrichment.state !== 'failed'} /> : ocrError ? <p className="notice warn">{ocrError}</p> : <p className="empty">Loading OCR results...</p>)}
+          {active === 'pages' && pageInfo && ocr && <PageView runId={run.id} pages={pageInfo} items={ocr} />}
           {active === 'stories' && enriched && stories && <StoriesView runId={run.id} stories={stories} />}
           {active === 'review' && enriched && <ReviewTable items={review} />}
         </>

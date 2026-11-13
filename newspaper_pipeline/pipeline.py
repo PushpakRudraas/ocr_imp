@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .clean.filter import filter_raw_events
+from .ocr.adscan import AD, label_records
 from .clean.normalize import clean_article, mark_exact_duplicates
 from .clean.translate import TranslationBackend
 from .cluster.clusterer import StoryClusterer
@@ -32,7 +33,7 @@ from .input.manifest import Manifest
 from .input.splitter import PageRecord, split_edition
 from .ocr.backends import OcrEngine
 from .ocr.run import OcrUnavailable, extract_edition
-from .output.export import export_all, export_clean
+from .output.export import export_all, export_clean, export_ocr, export_pages
 from .store import make_store
 
 log = logging.getLogger("np.pipeline")
@@ -67,6 +68,7 @@ class Pipeline:
         self.render_pages = render_pages
         self.on_stage = on_stage or (lambda name: None)      # progress hook: called with the stage about to run
         self.timings: dict[str, float] = {}
+        self.page_regions: list[dict] = []                   # per page: size + YOLO ad/article regions (for the UI page view)
         self.device: str | None = None                       # "cuda" | "cpu": where the enrichment models run (set by build_pipeline)
 
     def _timed(self, name: str):
@@ -96,19 +98,26 @@ class Pipeline:
                 by_paper.setdefault(p.paper_id, []).append(p)
             for paper_id, ps in by_paper.items():
                 try:
-                    recs += extract_edition(ps, self.s, self.ocr_engine, self.fallback)
+                    recs += extract_edition(ps, self.s, self.ocr_engine, self.fallback, regions_out=self.page_regions)
                 except OcrUnavailable as e:
                     log.error("%s: %s", paper_id, e)
                     skipped.append(paper_id)
         self.skipped_papers = skipped
+        label_records(recs)                                   # news / ad / uncertain, stored on the raw event; nothing is deleted
         self.store.put_many("ocr", recs, "article_id")
         return recs
 
     def clean(self, recs: list[dict]) -> list[dict]:
         with self._timed("clean"):
             ingested_ms = time.time() * 1000
-            filtered = filter_raw_events(recs)
-            self.clean_filter = {**filtered.stats(), "removed_items": filtered.removed}
+            ads = [r for r in recs if r.get("ad_label") == AD]          # the gate: ads stay in raw_events, never reach clean_events
+            ad_drops = [{"article_id": r.get("article_id"), "paper_id": r.get("paper_id"), "date": r.get("date"),
+                         "reason": f"ad: {r.get('ad_reason')}"} for r in ads]
+            filtered = filter_raw_events([r for r in recs if r.get("ad_label") != AD])
+            stats = filtered.stats()
+            self.clean_filter = {**stats, "input": stats["input"] + len(ads), "removed": stats["removed"] + len(ads),
+                                 "by_reason": {**stats["by_reason"], **({"ad": len(ads)} if ads else {})},
+                                 "removed_items": ad_drops + filtered.removed}
             if filtered.removed:
                 log.info("clean: removed %d of %d raw events %s", len(filtered.removed), len(recs),
                          self.clean_filter["by_reason"])
@@ -184,6 +193,8 @@ class Pipeline:
         metrics["stage_seconds"] = {**self.timings, "total": round(time.time() - t0, 3)}
         if out_dir:
             export_clean(ex.arts, out_dir)
+            export_ocr(ex.recs, out_dir, (getattr(self, "clean_filter", None) or {}).get("removed_items"))
+            export_pages(self.page_regions, out_dir)
         if not enrich:
             if out_dir:
                 export_all([], out_dir, metrics)

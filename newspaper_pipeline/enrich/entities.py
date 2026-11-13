@@ -179,7 +179,7 @@ def extract_entities(headline: str, text: str, max_entities: int = 14, models=No
             kinds.pop(short)
     # fold acronyms and expansions: AAP == Aam Aadmi Party
     for ac, full in L.KNOWN_ORGS.items():
-        if ac in kinds and full in kinds:
+        if ac != full and ac in kinds and full in kinds:      # "NATO": "NATO" maps to itself: nothing to fold
             counts[full] += counts.pop(ac); kinds.pop(ac)
     # a person name contained in an org/GPE ("Punjab" in "Punjab Assembly") stays separate; drop only exact dupes
     names = sorted(counts, key=lambda n: (-counts[n], first_pos[n]))[:max_entities]

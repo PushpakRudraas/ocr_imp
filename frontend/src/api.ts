@@ -1,4 +1,4 @@
-import type { Article, Capabilities, CleanArticle, ReviewItem, Run, Story, StoryGraph, UploadItem } from './types';
+import type { Article, Capabilities, CleanArticle, OcrArticle, PageInfo, ReviewItem, Run, Story, StoryGraph, UploadItem } from './types';
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
@@ -41,6 +41,12 @@ export const getConfig = () => request<Capabilities>('/api/config');
 export const listRuns = () => request<Run[]>('/api/runs');
 export const getRun = (id: string) => request<Run>(`/api/runs/${id}`);
 export const getClean = (id: string) => request<CleanArticle[]>(`/api/runs/${id}/clean`);
+export const getOcr = (id: string) => request<OcrArticle[]>(`/api/runs/${id}/ocr`);
+/** Reviewer override of the ad detector for one OCR result. */
+export const markOcr = (id: string, articleId: string, label: 'ad' | 'news') =>
+  request<{ article_id: string; label: string }>(`/api/runs/${id}/ocr/${articleId}/mark`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) });
+export const getPages = (id: string) => request<PageInfo[]>(`/api/runs/${id}/pages`);
+export const pageImageUrl = (id: string, paperId: string, pageNo: number) => `/api/runs/${id}/pages/${encodeURIComponent(paperId)}/${pageNo}/image`;
 export const getStories = (id: string) => request<Story[]>(`/api/runs/${id}/stories`);
 export const getReview = (id: string) => request<ReviewItem[]>(`/api/runs/${id}/review`);
 export const getArticle = (id: string, eventId: string) => request<Article>(`/api/runs/${id}/articles/${eventId}`);

@@ -1,4 +1,4 @@
-# Whole stack:  docker compose up -d --build     ->  UI on http://localhost:${WEB_PORT:-8080}
+# Whole stack:  docker compose up -d --build     ->  UI on http://localhost:${WEB_PORT:-8181}
 # Infra only (for local dev / tests):  docker compose up -d mongo postgres neo4j kafka
 #
 # Everything passes through Kafka (the api only serves HTTP and publishes jobs):
@@ -237,7 +237,7 @@ services:
     depends_on:
       api: {condition: service_healthy}
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_PORT:-8181}:80"
 
 volumes:
   mongo-data:

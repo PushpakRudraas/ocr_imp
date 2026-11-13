@@ -66,7 +66,7 @@ def clean_views(arts: list[dict]) -> list[dict]:
     for a in arts:
         text = a.get("translated_text") or a.get("text") or ""
         out.append({
-            "event_id": a["event_id"], "paper": a.get("paper_name") or a["paper_id"], "paper_id": a["paper_id"],
+            "event_id": a["event_id"], "article_id": a.get("article_id"), "paper": a.get("paper_name") or a["paper_id"], "paper_id": a["paper_id"],
             "page_no": a.get("page_no"), "headline": a.get("headline", ""), "translated_headline": a.get("translated_headline"),
             "byline": a.get("byline"), "language": a.get("detected_language") or a.get("language"),
             "translation_status": a.get("translation_status"), "ocr_confidence": a.get("ocr_confidence"),
@@ -74,6 +74,46 @@ def clean_views(arts: list[dict]) -> list[dict]:
             "exact_duplicate_of": a.get("exact_duplicate_of")})
     out.sort(key=lambda v: (v["paper"], v["page_no"] or 0, v["event_id"]))
     return out
+
+
+def ocr_views(recs: list[dict], removed: list[dict] | None = None) -> list[dict]:
+    """Every raw OCR article, in reading order (paper as given, then page, then top-to-bottom / left-to-right), including
+    the ones the clean filter later dropped (ads, stubs, duplicates) and those with low OCR confidence."""
+    why = {r["article_id"]: r for r in (removed or [])}
+    paper_rank: dict[str, int] = {}
+    for r in recs:
+        paper_rank.setdefault(r.get("paper_id"), len(paper_rank))
+
+    def pos(r: dict) -> tuple:
+        bb = r.get("headline_bbox") or (r.get("body_bboxes") or [[0, 0]])[0]
+        return (paper_rank[r.get("paper_id")], r.get("page_no") or 0, round(bb[1] / 20), bb[0])
+
+    out = []
+    for _, r in sorted(enumerate(recs), key=lambda t: (pos(t[1]), t[0])):
+        text = r.get("text") or ""
+        drop = why.get(r.get("article_id"))
+        out.append({
+            "article_id": r.get("article_id"), "paper": r.get("paper_name") or r.get("paper_id"), "paper_id": r.get("paper_id"),
+            "page_no": r.get("page_no"), "headline": r.get("headline", ""), "byline": r.get("byline"),
+            "language": r.get("language"), "ocr_confidence": r.get("ocr_confidence"), "status": r.get("status"),
+            "quality_issues": r.get("quality_issues") or [], "flags": r.get("flags") or [],
+            "chars": len(text), "text": text,
+            "bboxes": ([r["headline_bbox"]] if r.get("headline_bbox") else []) + list(r.get("body_bboxes") or []),
+            "ad_label": r.get("ad_label"), "ad_reason": r.get("ad_reason"), "ad_score": r.get("ad_score"),
+            "kept": drop is None, "removed_reason": drop["reason"] if drop else None,
+            "duplicate_of": drop.get("duplicate_of") if drop else None})
+    return out
+
+
+def export_ocr(recs: list[dict], out_dir: str | Path, removed: list[dict] | None = None) -> dict:
+    _dump(Path(out_dir) / "ocr_articles.json", ocr_views(recs, removed))
+    return {"ocr": len(recs)}
+
+
+def export_pages(page_regions: list[dict], out_dir: str | Path) -> dict:
+    """pages.json: for every page its size (PDF points) and the YOLO ad/article regions - the UI's page view draws on these."""
+    _dump(Path(out_dir) / "pages.json", sorted(page_regions, key=lambda p: (p["paper_id"], p["page_no"])))
+    return {"pages": len(page_regions)}
 
 
 def export_clean(arts: list[dict], out_dir: str | Path) -> dict:

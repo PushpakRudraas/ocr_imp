@@ -16,6 +16,7 @@ import pymupdf as fitz
 
 from ..input.splitter import PageRecord
 from .models import BODY, IMAGE, Block, OcrLine
+from .textfix import fix_spacing
 
 
 class OcrEngine(Protocol):
@@ -97,10 +98,25 @@ class ImageOcrBackend:
         from PIL import Image
         img = Image.open(page.image_path)
         sx, sy = page.width / img.width, page.height / img.height
-        lines = [ln for ln in self.engine.read(img) if ln.text.strip()]
-        scaled = [(ln.text.strip(), (ln.bbox[0] * sx, ln.bbox[1] * sy, ln.bbox[2] * sx, ln.bbox[3] * sy), ln.conf)
+        lines = [ln for ln in self._read_strips(img) if ln.text.strip()]
+        scaled = [(fix_spacing(ln.text.strip()), (ln.bbox[0] * sx, ln.bbox[1] * sy, ln.bbox[2] * sx, ln.bbox[3] * sy), ln.conf)
                   for ln in lines]
         return self._group(scaled, page.page_no)
+
+    def _read_strips(self, img, strip: int = 1000, margin: int = 160) -> list[OcrLine]:
+        """OCR engines shrink big images (RapidOCR caps the long side at ~2000 px), which blurs small newspaper type and
+        costs letters and spaces. Read a tall page as overlapping full-width strips instead: each line is kept from the
+        one strip that owns its centre, so nothing is read twice or cut in half."""
+        if img.height <= strip + 2 * margin:
+            return self.engine.read(img)
+        out: list[OcrLine] = []
+        for top in range(0, img.height, strip):
+            y0, y1 = max(0, top - margin), min(img.height, top + strip + margin)
+            for ln in self.engine.read(img.crop((0, y0, img.width, y1))):
+                cy = y0 + (ln.bbox[1] + ln.bbox[3]) / 2
+                if top <= cy < top + strip:
+                    out.append(OcrLine(ln.text, (ln.bbox[0], ln.bbox[1] + y0, ln.bbox[2], ln.bbox[3] + y0), ln.conf))
+        return out
 
     @staticmethod
     def _size(text: str, bb) -> float:

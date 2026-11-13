@@ -43,7 +43,7 @@ from ..bus import KafkaBus, make_bus
 from ..components import default_components
 from ..config import Settings
 from ..input.manifest import REPUTATIONS, Manifest, PaperSpec
-from ..jobs import build_enrich_job, enrich_state, run_enrichment, run_extraction
+from ..jobs import ad_marks, build_enrich_job, enrich_state, run_enrichment, run_extraction
 from ..pipeline import Pipeline
 from ..runs import RunNotFound, RunStore
 
@@ -266,6 +266,65 @@ class RunManager:
             raise HTTPException(404, "clean_articles.json not found")
         return json.loads(f.read_text(encoding="utf-8"))
 
+    def ocr_articles(self, run_id: str) -> list[dict]:
+        """Every raw OCR result of the run in reading order, kept or filtered out, with the ad label (reviewer marks win)."""
+        run = self.get(run_id)
+        if run["status"] != "done":
+            raise HTTPException(409, f"run is {run['status']}")
+        f = self.root / run_id / "out" / "ocr_articles.json"
+        if not f.exists():
+            raise HTTPException(404, "this run has no saved OCR results (it was extracted before they were kept) - upload it again")
+        items = json.loads(f.read_text(encoding="utf-8"))
+        marks = ad_marks(self.store, run_id)
+        for it in items:
+            m = marks.get(it["article_id"])
+            it["marked"] = m
+            if m:
+                it["ad_label"] = m                       # a reviewer's call overrides the rules
+        return items
+
+    def page_regions(self, run_id: str) -> list[dict]:
+        run = self.get(run_id)
+        if run["status"] != "done":
+            raise HTTPException(409, f"run is {run['status']}")
+        f = self.root / run_id / "out" / "pages.json"
+        if not f.exists():
+            raise HTTPException(404, "this run has no saved page layout - upload it again")
+        return json.loads(f.read_text(encoding="utf-8"))
+
+    def page_image(self, run_id: str, paper_id: str, page_no: int) -> Path:
+        """A small JPEG of one page for the page view, rendered from the uploaded PDF and cached next to the run."""
+        run = self.get(run_id)
+        if paper_id not in {p["id"] for p in run["papers"]} or not 1 <= page_no <= 500:
+            raise HTTPException(404, "unknown page")
+        pdf = self.root / run_id / "uploads" / f"{paper_id}.pdf"
+        if not pdf.exists():
+            raise HTTPException(404, "the uploaded PDF is no longer available")
+        out = self.root / run_id / "out" / "page_images" / paper_id / f"{page_no}.jpg"
+        if not out.exists():
+            import pymupdf as fitz
+            with fitz.open(pdf) as doc:
+                if page_no > doc.page_count:
+                    raise HTTPException(404, "unknown page")
+                pix = doc[page_no - 1].get_pixmap(dpi=100)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(pix.tobytes("jpg", jpg_quality=80))
+        return out
+
+    def mark_ocr(self, run_id: str, article_id: str, label: str) -> dict:
+        """Reviewer override: call an OCR result an ad (kept out of enrichment) or news. Stored per run; raw_events is untouched."""
+        if label not in ("ad", "news") or not _EVENT_ID.match(article_id):
+            raise HTTPException(400, "label must be 'ad' or 'news'")
+        run = self.get(run_id)
+        if run["status"] != "done":
+            raise HTTPException(409, f"run is {run['status']}")
+        if run["enrichment"]["state"] in ("queued", "running", "done") and label == "ad":
+            raise HTTPException(409, "this run is already enriched - the mark would not change the stored data")
+        marks = ad_marks(self.store, run_id)
+        marks[article_id] = label
+        (self.root / run_id / "out" / "ad_marks.json").write_text(json.dumps(marks), encoding="utf-8")
+        return {"article_id": article_id, "label": label}
+
     def article(self, run_id: str, event_id: str) -> dict:
         if not _EVENT_ID.match(event_id):
             raise HTTPException(404, "unknown article")
@@ -324,6 +383,22 @@ def create_app(workdir: str | Path | None = None, make_pipeline=None, sync: bool
     @app.get("/api/runs/{run_id}/clean")
     def clean(run_id: str):
         return mgr.clean_articles(run_id)
+
+    @app.post("/api/runs/{run_id}/ocr/{article_id}/mark")
+    def mark_ocr(run_id: str, article_id: str, body: dict):
+        return mgr.mark_ocr(run_id, article_id, str(body.get("label", "")))
+
+    @app.get("/api/runs/{run_id}/pages")
+    def pages(run_id: str):
+        return mgr.page_regions(run_id)
+
+    @app.get("/api/runs/{run_id}/pages/{paper_id}/{page_no}/image")
+    def page_image(run_id: str, paper_id: str, page_no: int):
+        return FileResponse(mgr.page_image(run_id, paper_id, page_no), media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+    @app.get("/api/runs/{run_id}/ocr")
+    def ocr(run_id: str):
+        return mgr.ocr_articles(run_id)
 
     @app.get("/api/runs")
     def list_runs():

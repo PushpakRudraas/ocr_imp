@@ -35,14 +35,28 @@ def clean_event_ids(runs: RunStore, run_id: str) -> list[str]:
     return [a["event_id"] for a in json.loads(f.read_text(encoding="utf-8"))] if f.exists() else []
 
 
+def ad_marks(runs: RunStore, run_id: str) -> dict[str, str]:
+    """Reviewer overrides from the UI: article_id -> "ad" | "news"."""
+    f = runs.dir(run_id) / "out" / "ad_marks.json"
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    except ValueError:
+        return {}
+
+
 def build_enrich_job(runs: RunStore, run_id: str) -> dict:
-    """The "enrich this run" message: pointers only (run id, date, clean event ids). The worker reads the data from MongoDB."""
-    return {"run_id": run_id, "run_date": runs.get(run_id)["run_date"], "event_ids": clean_event_ids(runs, run_id)}
+    """The "enrich this run" message: pointers only (run id, date, clean event ids). The worker reads the data from MongoDB.
+    Articles a reviewer marked as ads are left out, so they never get enriched."""
+    marks = ad_marks(runs, run_id)
+    f = runs.dir(run_id) / "out" / "clean_articles.json"
+    arts = json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+    ids = [a["event_id"] for a in arts if marks.get(a.get("article_id")) != "ad" and a.get("ad_label") != "ad"]
+    return {"run_id": run_id, "run_date": runs.get(run_id)["run_date"], "event_ids": ids}
 
 
 def _settings(runs: RunStore, run_id: str) -> Settings:
     d = runs.dir(run_id)
-    return Settings(data_dir=str(d / "data"), db_path=str(d / "data" / "pipeline.sqlite"), render_dpi=150)
+    return Settings(data_dir=str(d / "data"), db_path=str(d / "data" / "pipeline.sqlite"))
 
 
 # ===================================================================================================== phase 1

@@ -88,6 +88,31 @@ export interface CleanArticle {
   exact_duplicate_of: string | null;
 }
 
+/** One raw OCR article in reading order, whether or not the clean filter kept it. */
+export interface OcrArticle {
+  article_id: string;
+  paper: string;
+  paper_id: string;
+  page_no: number | null;
+  headline: string;
+  byline: string | null;
+  language: string | null;
+  ocr_confidence: number | null;
+  status: string | null;
+  quality_issues: string[];
+  flags: string[];
+  chars: number;
+  text: string;
+  bboxes: number[][];
+  ad_label: 'news' | 'ad' | 'uncertain' | null;
+  ad_reason: string | null;
+  ad_score: number | null;
+  marked?: 'ad' | 'news' | null;
+  kept: boolean;
+  removed_reason: string | null;
+  duplicate_of: string | null;
+}
+
 export interface Coverage {
   paper: string;
   paper_id: string;
@@ -182,4 +207,14 @@ export interface StoryGraph {
   articles: { event_id: string; headline: string; paper_id: string; paper: string; page: number }[];
   entities: GraphEntity[];
   relations: GraphRelation[];
+}
+
+/** One region the YOLO ad model found, in PDF points. */
+export interface PageRegion { id: number; label: 'ad' | 'article'; conf: number; bbox: [number, number, number, number] }
+/** One layout block (DocLayout-YOLO: title, plain text, figure, ...), in PDF points. */
+export interface PageBlock { id: number; cls: string; conf: number; bbox: [number, number, number, number] }
+/** A page's size (PDF points), the ad candidates and layout blocks, for the page view. `ad_conf` = the threshold the pipeline used. */
+export interface PageInfo {
+  paper_id: string; page_no: number; width: number; height: number;
+  yolo: boolean; layout?: boolean; ad_conf?: number; regions: PageRegion[]; blocks?: PageBlock[];
 }
