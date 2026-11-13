@@ -61,6 +61,7 @@ def enrich_article(rec: dict, models=None) -> dict:
                  "near_dup_status": near, "cluster_status": cluster["cluster_status"],
                  "suggested_story_key": cluster["suggested_story_key"],
                  "expected_coverage": f"{len(cluster['story_papers'])} paper(s): {', '.join(cluster['story_papers'])}",
+                 "matches": cluster.get("matches", []),
                  "review_candidates": cluster.get("review_candidates", [])}
     else:
         dedup = {"exact_dup_key": rec["exact_dup_key"], "near_dup_status": "needs_corpus",

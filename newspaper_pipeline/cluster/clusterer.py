@@ -13,8 +13,9 @@ import re
 from ..config import Settings
 from .embed import Embedder, HashingEmbedder, embedding_text
 from .index import DateWindow, InMemoryIndex, VectorIndex
+from .keystats import KeywordStats, from_env
 from .scorer import PairJudge, RuleScorer
-from .signals import jaccard, pair_features, shingles
+from .signals import jaccard, keywords, pair_features, shingles
 
 _SLUG_STOP = set("a an the of in on at to for from by with and or as is are was were be been it its this that "
                  "after over into new says said say".split())
@@ -52,12 +53,13 @@ class _UnionFind:
 class StoryClusterer:
     def __init__(self, embedder: Embedder | None = None, index: VectorIndex | None = None,
                  scorer: RuleScorer | None = None, judge: PairJudge | None = None,
-                 settings: Settings | None = None) -> None:
+                 settings: Settings | None = None, stats: KeywordStats | None = None) -> None:
         self.s = settings or Settings()
         self.embedder = embedder or HashingEmbedder()
         self.index = index if index is not None else InMemoryIndex()
         self.scorer = scorer or RuleScorer(cos_ref=getattr(self.embedder, "cos_ref", 0.40))
         self.judge = judge
+        self.stats = stats if stats is not None else from_env()      # how common each word is (rare words weigh more)
         self._uf = _UnionFind()
         self._articles: dict[str, dict] = {}          # event_id -> article
         self._story_of: dict[str, str] = {}           # event_id -> story id (pre-merge, resolved via union-find)
@@ -82,15 +84,17 @@ class StoryClusterer:
         self._story_of.setdefault(cid, sid)
         return sid
 
-    def _decide(self, a: dict, b: dict, cosine: float) -> tuple[float, list[str]]:
-        scored = self.scorer.score(pair_features(a, b, cosine))
+    def _decide(self, a: dict, b: dict, cosine: float) -> tuple[float, list[str], dict]:
+        scored = self.scorer.score(pair_features(a, b, cosine, self.stats))
         score, reasons = scored.score, list(scored.reasons)
+        parts = {"components": scored.components, "veto": scored.veto, "cosine": round(float(cosine), 3)}
         if self.judge and self.s.borderline_threshold <= score < self.s.same_story_threshold:
             j = self.judge.judge(a, b)
             if j is not None:
                 score = 0.5 * score + 0.5 * j
                 reasons.append(f"judge={j:.2f}")
-        return score, reasons
+                parts["judge"] = round(j, 3)
+        return score, reasons, parts
 
     def add(self, article: dict) -> dict:
         eid = article["event_id"]
@@ -111,16 +115,17 @@ class StoryClusterer:
             if other is None:
                 continue
             self._story_for(cid, payload)
-            score, reasons = self._decide(article, other, cosine)
+            score, reasons, parts = self._decide(article, other, cosine)
             if score >= self.s.same_story_threshold:
-                matches.append({"event_id": cid, "score": round(score, 3), "reasons": reasons})
+                matches.append({"event_id": cid, "score": round(score, 3), "reasons": reasons, **parts})
             elif score >= self.s.borderline_threshold:
-                borderline.append({"event_id": cid, "score": round(score, 3), "reasons": reasons})
+                borderline.append({"event_id": cid, "score": round(score, 3), "reasons": reasons, **parts})
             sj = jaccard(sh_a, shingles((other.get("working_headline") or "") + ". " + (other.get("working_text") or "")))
             if sj >= self.s.near_dup_jaccard and sj > best_shingle:
                 best_shingle, near_dup = sj, cid
 
         self._articles[eid] = article
+        self.stats.update(eid, keywords(article.get("working_text", ""), article.get("working_headline", "")))
         if matches:
             roots = {self._uf.find(self._story_of[m["event_id"]]) for m in matches}
             story = min(roots)
@@ -183,6 +188,7 @@ class StoryClusterer:
         for a in ordered:
             self.add(a)
         self._pre_vec.clear()
+        self.stats.save()
         stories = self.stories()
         for a in articles:
             r = self.result_for(a["event_id"])

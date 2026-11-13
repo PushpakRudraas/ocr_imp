@@ -260,3 +260,80 @@ def test_all_pair_decisions_match_ground_truth(clean_articles):
         fn += same_truth and not same_pred
     assert fp == 0, f"false merges: {fp}"
     assert tp / (tp + fn) >= 0.9, f"recall {tp}/{tp + fn}"
+
+
+# ---------------------------------------------------------------------------------------------- story-matching upgrade (steps 1-4)
+from newspaper_pipeline.cluster.keystats import KeywordStats
+from newspaper_pipeline.cluster.signals import keywords, location_match, locations, winner
+
+
+def test_keyword_stats_idf_persist_and_no_double_count(tmp_path):
+    st = KeywordStats(str(tmp_path / "df.json"))
+    assert st.factor("election") == 1.0                              # too few articles to say anything
+    for i in range(40):
+        st.update(f"e{i}", ["election", "government"] + (["ranchi"] if i == 0 else []))
+    st.update("e0", ["election"])                                    # same article again: ignored
+    assert st.n == 40 and st.df["election"] == 40
+    assert st.factor("election") < 0.5 < st.factor("ranchi") <= 1.0   # common word scaled down, rare word keeps its weight
+    st.save()
+    again = KeywordStats(str(tmp_path / "df.json"))
+    assert again.n == 40 and again.factor("election") == st.factor("election")
+    kw = keywords("The election in Ranchi was held on Monday.", "Ranchi election", st)
+    assert kw["ranchi"] > kw["election"]
+
+
+def test_locations_and_tiers():
+    ranchi = locations("Cong sweeps Jharkhand polls", "Ranchi: counting continued across Jharkhand.", "Ranchi")
+    other = locations("JMM leader praises voters", "Counting in Ranchi ended late.")
+    mumbai = locations("BJP wins Maharashtra", "Mumbai: the BJP won Maharashtra.", "Mumbai")
+    assert location_match(ranchi, other)[0] == 0.8                      # same city
+    assert location_match(locations("", "Polling in Jharkhand."), locations("", "Jharkhand voted."))[0] == 0.5
+    assert location_match(ranchi, {})[0] is None                         # unknown place: neutral, not a mismatch
+    score, conflict, _ = location_match(ranchi, mumbai, set(locations("Cong sweeps Jharkhand polls", "")),
+                                        set(locations("BJP wins Maharashtra", "")))
+    assert score == 0.0 and "Jharkhand" in conflict and "Maharashtra" in conflict
+    # the capital is named in most national stories: never a conflict on its own
+    delhi = locations("PM meets leaders", "New Delhi: the Prime Minister met leaders.")
+    assert location_match(delhi, mumbai)[1] is None
+
+
+def test_winner_extraction():
+    assert winner("BJP wins Maharashtra as opposition crumbles") == "bjp"
+    assert winner("Congress sweeps Jharkhand polls") == "congress"
+    assert winner("BJP loses Jharkhand") is None
+
+
+JH = ("Ranchi: The Congress-JMM alliance won the Jharkhand election on Sunday, with the BJP losing power in the state after "
+      "a decade. Counting ended late in Ranchi and the alliance leaders thanked voters across Jharkhand.")
+MH = ("Mumbai: The BJP won the Maharashtra election on Sunday, with the opposition losing power in the state. Counting "
+      "ended late in Mumbai and the BJP leaders thanked voters across Maharashtra.")
+
+
+def test_veto_stops_two_elections_merging_even_when_wording_is_similar():
+    a = _art(1, "p1", "Congress alliance wins Jharkhand election", JH, city="Ranchi")
+    b = _art(2, "p2", "BJP wins Maharashtra election", MH, city="Mumbai")
+    f = pair_features(a, b, 0.9)                                         # embedding says "very similar"
+    assert f.location_conflict and f.winner_conflict
+    capped = RuleScorer(vetoes=True).score(f)
+    free = RuleScorer(vetoes=False).score(f)
+    assert capped.score <= RuleScorer.VETO_CAP < 0.75 and any(r.startswith("veto:") for r in capped.reasons)
+    assert free.score > capped.score and capped.veto
+
+
+def test_same_event_in_two_papers_is_not_vetoed_and_place_is_neutral_when_unknown():
+    a = _art(1, "p1", "Congress alliance wins Jharkhand election", JH, city="Ranchi")
+    b = _art(2, "p2", "Cong-JMM sweep Jharkhand polls", JH.replace("Ranchi:", "Ranchi:"), city="Ranchi")
+    s = RuleScorer().score(pair_features(a, b, 0.9))
+    assert s.veto is None and s.score > 0.75 and s.components["location"] == 0.8
+    nowhere = _art(3, "p2", "Alliance wins big", "The alliance won the election on Sunday and leaders thanked voters.")
+    s2 = RuleScorer().score(pair_features(a, nowhere, 0.9))
+    assert s2.components["location"] is None and s2.veto is None
+
+
+def test_index_table_name_per_embedder():
+    from newspaper_pipeline.cli import _index_table
+
+    class E:
+        def __init__(self, name): self.name = name
+    assert _index_table(E("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")) == "article_embeddings"
+    assert _index_table(E("BAAI/bge-m3")) == "article_embeddings_baai_bge_m3"

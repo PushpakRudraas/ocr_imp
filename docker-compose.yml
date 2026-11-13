@@ -22,7 +22,7 @@ x-pipeline-env: &pipeline-env
   NP_MONGO_DB: newspaper
   NP_INDEX: pgvector
   NP_EMBED_DIM: "384"            # paraphrase-multilingual-MiniLM-L12-v2
-  NP_EMBEDDER: ${NP_EMBEDDER:-minilm}
+  NP_EMBEDDER: ${NP_EMBEDDER:-bge-m3}
   NP_ENRICH_MODELS: ${NP_ENRICH_MODELS:-hf}
   NP_PG_DSN: postgresql://${POSTGRES_USER:-newspaper}:${POSTGRES_PASSWORD:-newspaper-dev}@postgres:5432/${POSTGRES_DB:-newspaper}
   NP_GRAPH: neo4j
@@ -212,6 +212,8 @@ services:
       NP_TRANSLATOR: none            # translation already happened in phase 1; the stored clean events carry it
       NP_OCR: none
       NP_DEVICE: ${NP_DEVICE:-cuda}  # embedder + NLP models on the GPU; "cuda" fails loudly instead of silently using the CPU
+      NP_KEYWORD_DF: /data/keyword_df.json   # how common each word is across all articles seen so far (rare words weigh more)
+      NP_SCORER_VETOES: ${NP_SCORER_VETOES:-1}   # 0 = switch the "different place / different winner" veto rules off
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     deploy:

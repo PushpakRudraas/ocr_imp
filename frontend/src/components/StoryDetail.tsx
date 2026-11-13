@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ApiError, getArticle } from '../api';
 import { humanize } from '../lib/guess';
 import type { Article, Coverage, Story } from '../types';
+import MatchReasons from './MatchReasons';
 import Relationships from './Relationships';
 
 function PaperColumn({ runId, cov }: { runId: string; cov: Coverage }) {
@@ -71,6 +72,7 @@ export default function StoryDetail({ runId, story }: { runId: string; story: St
         </p>
         <p className="summary">{story.summary.replace(/^single_source:\s*/, '')}</p>
       </header>
+      <MatchReasons story={story} />
       <Relationships runId={runId} storyId={story.story_id} />
       <div className="columns" style={{ gridTemplateColumns: `repeat(${Math.min(story.coverage.length, 3)}, minmax(0, 1fr))` }}>
         {story.coverage.map((c) => <PaperColumn key={c.event_id} runId={runId} cov={c} />)}

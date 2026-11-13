@@ -14,8 +14,9 @@ class Embedder(Protocol):
         """Returns an (n, dim) float32 array of L2-normalised vectors."""
 
 
-def embedding_text(article: dict, max_chars: int = 1500) -> str:
-    """Headline + the start of the (English) body: the lead carries who/what/where for a news story."""
+def embedding_text(article: dict, max_chars: int = 3000) -> str:
+    """Headline + the start of the (English) body: the lead carries who/what/where for a news story. 3000 characters: BGE-M3
+    reads about 8k tokens (the older MiniLM stops after ~128 and simply ignores the rest)."""
     head = article.get("working_headline") or article.get("headline") or ""
     body = article.get("working_text") or article.get("text") or ""
     return f"{head}\n{body[:max_chars]}".strip()

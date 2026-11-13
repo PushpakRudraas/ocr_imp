@@ -113,6 +113,30 @@ export interface OcrArticle {
   duplicate_of: string | null;
 }
 
+/** How strongly each signal said two articles are the same event (0-1; place is null when an article names no place). */
+export interface MatchComponents { semantic: number; entity: number; location: number | null; date: number; keyword: number }
+/** Why an article was put into its story: its strongest match and the signals behind the score. */
+export interface MatchInfo {
+  score: number;
+  reasons: string[];
+  components?: MatchComponents | null;
+  veto?: string | null;
+  cosine?: number | null;
+  matched_with: string | null;
+  matched_headline: string | null;
+}
+/** A borderline pair: probably related, not sure enough to merge. */
+export interface PossibleMatch {
+  event_id: string;
+  paper: string;
+  headline: string;
+  score: number;
+  reasons: string[];
+  components?: MatchComponents | null;
+  veto?: string | null;
+  for_event_id: string;
+}
+
 export interface Coverage {
   paper: string;
   paper_id: string;
@@ -125,6 +149,7 @@ export interface Coverage {
   ocr_confidence: number | null;
   event_id: string;
   sentiment: string;
+  match?: MatchInfo | null;
 }
 
 export interface Story {
@@ -138,6 +163,7 @@ export interface Story {
   summary: string;
   bias_label: string;
   coverage: Coverage[];
+  possible_matches?: PossibleMatch[];
 }
 
 export interface ReviewItem {

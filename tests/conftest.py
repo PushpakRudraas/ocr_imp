@@ -82,7 +82,7 @@ def _wait(fn, what: str, timeout: float = 90):
 @pytest.fixture(scope="session")
 def mongo_uri(request):
     port = _run_container(request, "mongo", "mongo:7", 27017, {})
-    uri = f"mongodb://localhost:{port}"
+    uri = f"mongodb://127.0.0.1:{port}"
     from pymongo import MongoClient
     _wait(lambda: MongoClient(uri, serverSelectionTimeoutMS=1000).admin.command("ping"), "mongo")
     return uri
@@ -92,7 +92,7 @@ def mongo_uri(request):
 def pg_dsn(request):
     port = _run_container(request, "pg", "pgvector/pgvector:pg16", 5432,
                           {"POSTGRES_USER": "t", "POSTGRES_PASSWORD": "t", "POSTGRES_DB": "t"})
-    dsn = f"postgresql://t:t@localhost:{port}/t"
+    dsn = f"postgresql://t:t@127.0.0.1:{port}/t"
     import psycopg
     _wait(lambda: psycopg.connect(dsn, connect_timeout=2).execute("select 1").fetchone(), "postgres")
     return dsn
@@ -104,7 +104,7 @@ def neo4j_conf(request):
                           {"NEO4J_AUTH": "neo4j/test-password-123", "NEO4J_server_memory_heap_max__size": "512m",
                            "NEO4J_server_memory_pagecache_size": "128m"})
     from neo4j import GraphDatabase
-    uri = f"bolt://localhost:{port}"
+    uri = f"bolt://127.0.0.1:{port}"
 
     def ready():
         d = GraphDatabase.driver(uri, auth=("neo4j", "test-password-123"))

@@ -9,9 +9,9 @@ import RunPage from './RunPage';
 vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()), getRun: vi.fn(), getClean: vi.fn(), getOcr: vi.fn(), getPages: vi.fn(), enrichRun: vi.fn(), getConfig: vi.fn(), getStories: vi.fn(), getReview: vi.fn(), getArticle: vi.fn(), getStoryGraph: vi.fn() }));
 const m = vi.mocked(api);
 
-const setup = () => render(
+const setup = (pollMs = 5) => render(
   <MemoryRouter initialEntries={['/runs/abcdefabcdef']}>
-    <Routes><Route path="/runs/:runId" element={<RunPage pollMs={5} />} /></Routes>
+    <Routes><Route path="/runs/:runId" element={<RunPage pollMs={pollMs} />} /></Routes>
   </MemoryRouter>);
 
 beforeEach(() => {
@@ -35,7 +35,7 @@ describe('RunPage', () => {
       .mockResolvedValueOnce(run({ status: 'running', stage: 'ocr', metrics: null }))
       .mockResolvedValueOnce(run({ status: 'running', stage: 'store', metrics: null }))
       .mockResolvedValue(run());
-    setup();
+    setup(60);
     expect(await screen.findByText(/Queued on Kafka - waiting for the extraction worker/)).toBeInTheDocument();
     expect(await screen.findByText(/Processing/)).toBeInTheDocument();
     expect(screen.getByText('OCR + layout').closest('li')).toHaveAttribute('aria-current', 'step');
@@ -220,7 +220,7 @@ describe('RunPage', () => {
         .mockResolvedValue(run());
       m.enrichRun.mockResolvedValue(extractedOnly({ enrichment: enrichment({ state: 'queued', stage: 'queued' }) }));
       const u = userEvent.setup();
-      setup();
+      setup(60);
       await u.click(await screen.findByRole('button', { name: 'Run enrichment' }));
       expect(m.enrichRun).toHaveBeenCalledWith('abcdefabcdef');
       expect(await screen.findByText(/Queued on Kafka for the enrichment worker/)).toBeInTheDocument();
@@ -237,7 +237,7 @@ describe('RunPage', () => {
     it('keeps polling while enrichment is queued after extraction (started from the upload toggle)', async () => {
       m.getRun.mockResolvedValueOnce(run({ enrichment: enrichment({ state: 'queued', stage: 'queued' }), metrics: extractedOnly().metrics }))
         .mockResolvedValue(run());
-      setup();
+      setup(60);
       expect(await screen.findByText(/Queued on Kafka/)).toBeInTheDocument();
       expect(await screen.findByRole('tab', { name: /Stories \(2\)/ })).toBeInTheDocument();
       expect(m.getClean).toHaveBeenCalledTimes(1);                                  // articles are not refetched on every poll

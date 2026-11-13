@@ -48,17 +48,21 @@ per cent year years day days week month today yesterday monday tuesday wednesday
 january february march april june july august september october november december""".split())
 
 
-def keywords(text: str, headline: str = "") -> dict[str, float]:
+def keywords(text: str, headline: str = "", stats=None) -> dict[str, float]:
     """Content words (lower-cased, stop words and numbers dropped, light plural stemming) with weights: headline words
-    count double, so the topic of the story dominates incidental body vocabulary."""
+    count double, names count 1.5x, and - when `stats` (cluster.keystats.KeywordStats) is given - a word found in most
+    articles is scaled down, so event-specific words (a candidate, a constituency) dominate generic ones ("election")."""
+    names = proper_nouns(f"{headline}. {text}")
     out: dict[str, float] = {}
     for src, weight in ((headline, 2.0), (text, 1.0)):
         for w in _WORD.findall((src or "").lower()):
             if len(w) < 3 or w.isdigit() or w in _STOP_WORDS:
                 continue
+            boost = 1.5 if w in names else 1.0
             if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
                 w = w[:-1]
-            out[w] = max(out.get(w, 0.0), weight)
+            f = stats.factor(w) if stats is not None else 1.0
+            out[w] = max(out.get(w, 0.0), weight * boost * f)
     return out
 
 
@@ -98,6 +102,92 @@ def minhash(text: str, n: int = 3) -> MinHash:
     return m
 
 
+# ----------------------------------------------------------------------------------------------- place (step 3)
+from ..enrich import lexicons as _L           # noqa: E402  (gazetteer: Indian states and cities)
+
+_FOREIGN = {"pakistan": "PK", "china": "CN", "united states": "US", "america": "US", "britain": "GB", "russia": "RU",
+            "ukraine": "UA", "israel": "IL", "bangladesh": "BD", "nepal": "NP", "sri lanka": "LK", "afghanistan": "AF",
+            "france": "FR", "germany": "DE", "japan": "JP"}
+_WEAK_PLACES = {"delhi", "new delhi"}          # the capital is named in most national stories: never a reason to split two stories
+_PLACE_NAMES = sorted({*_L.INDIA_STATES, *_L.INDIA_CITIES, *_FOREIGN}, key=len, reverse=True)
+_PLACE_RE = re.compile(r"\b(" + "|".join(re.escape(n) for n in _PLACE_NAMES) + r")\b", re.I)
+
+
+def locations(headline: str, text: str, city: str | None = None) -> dict[str, float]:
+    """Places an article is about -> weight. Headline mentions count 3x, the lead 1.5x, the rest 1x; a dateline city adds to
+    itself and its state. Keys are lower-case place names (states, cities, foreign countries)."""
+    out: dict[str, float] = {}
+
+    def add(name: str, w: float) -> None:
+        out[name] = out.get(name, 0.0) + w
+        if name in _L.INDIA_CITIES:                       # a city also counts for its state, at half weight
+            st = _L.INDIA_CITIES[name][2]
+            if st != name:
+                out[st] = out.get(st, 0.0) + w * 0.5
+
+    for m in _PLACE_RE.finditer(headline or ""):
+        add(m.group(1).lower(), 3.0)
+    body = text or ""
+    for m in _PLACE_RE.finditer(body[:600]):
+        add(m.group(1).lower(), 1.5)
+    for m in _PLACE_RE.finditer(body[600:]):
+        add(m.group(1).lower(), 1.0)
+    if city and city.lower() in _PLACE_NAMES:
+        add(city.lower(), 2.0)
+    return out
+
+
+def _strong(loc: dict[str, float], headline_places: set[str]) -> set[str]:
+    """Places the article is clearly about (named in the headline, or at least twice): the basis for a conflict."""
+    return {p for p, w in loc.items() if p not in _WEAK_PLACES and (p in headline_places or w >= 2.5)}
+
+
+def location_match(la: dict[str, float], lb: dict[str, float], ha=frozenset(), hb=frozenset()
+                   ) -> tuple[float | None, str | None, str]:
+    """(score 0..1 or None when either article names no place, conflict note or None, short description).
+    Tiers: same city 0.8, same state 0.5, same foreign country 0.2, both place-bearing but nothing shared 0.0. Agreement is weak evidence (many different events happen in one city); disagreement is strong, so it also feeds the veto."""
+    if not la or not lb:
+        return None, None, "no place named"
+    shared = set(la) & set(lb)
+    cities = [p for p in shared if p in _L.INDIA_CITIES and p not in _WEAK_PLACES]
+    states = [p for p in shared if p in _L.INDIA_STATES and p not in _WEAK_PLACES]
+    foreign = [p for p in shared if p in _FOREIGN]
+    if cities:
+        return 0.8, None, "same city " + cities[0].title()
+    if states:
+        return 0.5, None, "same state " + states[0].title()
+    if foreign:
+        return 0.2, None, "same country " + foreign[0].title()
+    if shared:                                            # only the capital in common
+        return 0.1, None, "only the capital in common"
+    sa, sb = _strong(la, ha), _strong(lb, hb)
+    if sa and sb:                                         # both clearly about somewhere, and not the same place
+        top_a, top_b = max(sa, key=la.get), max(sb, key=lb.get)
+        return 0.0, f"different places ({top_a.title()} vs {top_b.title()})", "different places"
+    return None, None, "no clear place"                    # incidental mentions only: say nothing either way
+
+
+_WINNERS = r"bjp|congress|cong|aap|tmc|dmk|ncp|sad|jmm|rjd|bsp|jdu|sp|shiv sena|ysrcp|brs|npp"
+_WIN_RE = re.compile(rf"\b({_WINNERS})\b(?:\s+(?!and\b|vs\b|as\b|after\b|but\b|(?:{_WINNERS})\b)[\w-]+){{0,2}}?\s+"
+                     r"(?:wins?|won|sweeps?|retains?|storms|romps|bags|clinches|scripts)\b", re.I)
+_PARTY_ALIAS = {"cong": "congress"}
+_PARTY_RE = re.compile(rf"\b({_WINNERS})\b", re.I)
+
+
+def parties_in(headline: str) -> set[str]:
+    """Every party named anywhere in a headline (so "Cong-JMM sweep" names both Congress and the JMM)."""
+    return {_PARTY_ALIAS.get(m.lower(), m.lower()) for m in _PARTY_RE.findall(headline or "")}
+
+
+def winner(headline: str) -> str | None:
+    """Party a headline says won ("BJP wins Haryana", "Congress alliance wins ..."), or None."""
+    m = _WIN_RE.search(headline or "")
+    if not m:
+        return None
+    w = m.group(1).lower()
+    return _PARTY_ALIAS.get(w, w)
+
+
 @dataclass
 class PairFeatures:
     cosine: float
@@ -112,19 +202,32 @@ class PairFeatures:
     same_city: bool
     wire_match: bool
     shared_entities: list[str]
+    location_score: float | None = None      # None = one side names no place (neutral)
+    location_note: str = ""
+    location_conflict: str | None = None     # both clearly about different places
+    winner_conflict: str | None = None       # headlines name different winning parties
 
 
 def _date(a: dict) -> dt.date:
     return dt.date.fromisoformat(a["date"])
 
 
-def pair_features(a: dict, b: dict, cosine: float) -> PairFeatures:
+def pair_features(a: dict, b: dict, cosine: float, stats=None) -> PairFeatures:
     ta = a.get("working_headline", "") + ". " + a.get("working_text", "")
     tb = b.get("working_headline", "") + ". " + b.get("working_text", "")
     ea, eb = proper_nouns(ta), proper_nouns(tb)
     qa, qb = quotes(ta), quotes(tb)
     city_a, city_b = (a.get("city") or "").lower(), (b.get("city") or "").lower()
     wa, wb = a.get("wire_source"), b.get("wire_source")
+    ha_text, hb_text = a.get("working_headline", ""), b.get("working_headline", "")
+    la = locations(ha_text, a.get("working_text", ""), a.get("city"))
+    lb = locations(hb_text, b.get("working_text", ""), b.get("city"))
+    head_a, head_b = set(locations(ha_text, "")), set(locations(hb_text, ""))
+    loc_score, loc_conflict, loc_note = location_match(la, lb, head_a, head_b)
+    win_a, win_b = winner(ha_text), winner(hb_text)
+    win_conflict = None
+    if win_a and win_b and win_a != win_b and win_a not in parties_in(hb_text) and win_b not in parties_in(ha_text):
+        win_conflict = f"different winners ({win_a.upper()} vs {win_b.upper()})"      # an alliance headline names both: no conflict
     return PairFeatures(
         cosine=float(cosine),
         entity_overlap=overlap_coeff(ea, eb),
@@ -132,11 +235,12 @@ def pair_features(a: dict, b: dict, cosine: float) -> PairFeatures:
         number_overlap=overlap_coeff(numbers(ta), numbers(tb)),
         quote_overlap=jaccard(qa, qb) if (qa or qb) else 0.0,
         shingle_jaccard=jaccard(shingles(ta), shingles(tb)),
-        keyword_overlap=weighted_overlap(keywords(a.get("working_text", ""), a.get("working_headline", "")),
-                                         keywords(b.get("working_text", ""), b.get("working_headline", ""))),
+        keyword_overlap=weighted_overlap(keywords(a.get("working_text", ""), a.get("working_headline", ""), stats),
+                                         keywords(b.get("working_text", ""), b.get("working_headline", ""), stats)),
         date_gap_days=abs((_date(a) - _date(b)).days),
         same_paper=a["paper_id"] == b["paper_id"],
         same_city=bool(city_a and city_a == city_b),
         wire_match=bool(wa and wa == wb and city_a and city_a == city_b),
         shared_entities=sorted(ea & eb)[:12],
+        location_score=loc_score, location_note=loc_note, location_conflict=loc_conflict, winner_conflict=win_conflict,
     )

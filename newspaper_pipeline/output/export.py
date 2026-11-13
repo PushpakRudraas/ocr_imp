@@ -14,12 +14,42 @@ def _dump(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
+def _best_match(doc: dict, by_event: dict) -> dict | None:
+    """Why this article was put in its story: its strongest match, with the signals behind the score."""
+    ms = (doc["dedup_clustering"].get("matches") or [])
+    if not ms:
+        return None
+    m = max(ms, key=lambda x: x["score"])
+    other = by_event.get(m["event_id"])
+    return {"score": m["score"], "reasons": m.get("reasons", []), "components": m.get("components"), "veto": m.get("veto"),
+            "cosine": m.get("cosine"), "matched_with": other["newspaper"]["paper"] if other else None,
+            "matched_headline": (other["newspaper"]["translated_headline"] or other["newspaper"]["headline"]) if other else None}
+
+
+def _possible_matches(members: list[dict], by_event: dict) -> list[dict]:
+    """Borderline pairs involving this story: probably related, not sure enough to merge - for a person to check."""
+    out, seen = [], set()
+    for d in members:
+        for c in d["dedup_clustering"].get("review_candidates") or []:
+            other = by_event.get(c["event_id"])
+            key = tuple(sorted((d["event_id"], c["event_id"])))
+            if other is None or key in seen:
+                continue
+            seen.add(key)
+            out.append({"event_id": c["event_id"], "paper": other["newspaper"]["paper"],
+                        "headline": other["newspaper"]["translated_headline"] or other["newspaper"]["headline"],
+                        "score": c["score"], "reasons": c.get("reasons", []), "components": c.get("components"),
+                        "veto": c.get("veto"), "for_event_id": d["event_id"]})
+    return sorted(out, key=lambda x: -x["score"])[:6]
+
+
 def story_views(docs: list[dict]) -> list[dict]:
     """One entry per story: how every paper covered it. Multi-paper stories first."""
     by: dict[str, list[dict]] = defaultdict(list)
     for d in docs:
         by[d["story"]["story_id"] or d["event_id"]].append(d)
     views = []
+    by_event = {d["event_id"]: d for d in docs}
     for sid, members in by.items():
         members.sort(key=lambda d: (d["newspaper"]["paper"], d["newspaper"]["page_no"]))
         lead = max(members, key=lambda d: d["impact_score"]["value"])
@@ -39,7 +69,9 @@ def story_views(docs: list[dict]) -> list[dict]:
                 "headline": m["newspaper"]["headline"], "translated_headline": m["newspaper"]["translated_headline"],
                 "byline": m["newspaper"]["byline"], "language": m["newspaper"]["language"],
                 "ocr_confidence": m["newspaper"]["ocr_confidence"], "event_id": m["event_id"],
-                "sentiment": m["sentiment"]["document"]["label"]} for m in members]})
+                "sentiment": m["sentiment"]["document"]["label"],
+                "match": _best_match(m, by_event)} for m in members],
+            "possible_matches": _possible_matches(members, by_event)})
     views.sort(key=lambda v: (-v["n_papers"], -v["impact"], v["story_id"]))
     return views
 

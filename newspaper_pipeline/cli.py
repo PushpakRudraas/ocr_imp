@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -68,7 +69,7 @@ def build_pipeline(args, settings: Settings, shared: dict | None = None, phase: 
     embedder = cached(f"emb{args.embedder}{dim}{device}", makers.get(args.embedder) or (lambda: HashingEmbedder(dim=dim)))
     if index_backend == "pgvector":
         from .cluster.index import PgVectorIndex
-        index = PgVectorIndex(settings.pg_dsn, embedder.dim)
+        index = PgVectorIndex(settings.pg_dsn, embedder.dim, table=_index_table(embedder))
     elif index_backend == "qdrant":
         index = QdrantIndex(embedder.dim, path=getattr(args, "qdrant_path", None))
     else:
@@ -89,6 +90,15 @@ def build_pipeline(args, settings: Settings, shared: dict | None = None, phase: 
     p = Pipeline(settings, make_store(settings, shared), translator, engine, clusterer, refiner=refiner, graph=graph, models=models)
     p.device = device if (models is not None or args.embedder != "hashing") else "cpu"      # what the ML parts actually run on
     return p
+
+
+def _index_table(embedder) -> str:
+    """One pgvector table per embedding model: vectors of different models (and sizes) must never share a table. The MiniLM
+    table keeps its original name so data stored before the switch to BGE-M3 is untouched."""
+    name = getattr(embedder, "name", "") or ""
+    if not name or "MiniLM" in name:
+        return "article_embeddings"
+    return "article_embeddings_" + re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:30]
 
 
 def _common(p: argparse.ArgumentParser) -> None:
