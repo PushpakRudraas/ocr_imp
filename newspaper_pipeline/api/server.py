@@ -334,9 +334,9 @@ class RunManager:
             raise HTTPException(404, "unknown article")
         return json.loads(hits[0].read_text(encoding="utf-8"))
 
-    def story_graph(self, run_id: str, story_id: str) -> dict:
-        if not _STORY_ID.match(story_id):
-            raise HTTPException(404, "unknown story")
+    # ---------------------------------------------------------------------------------------- relationship graph (Neo4j)
+    def _graph_for(self, run_id: str):
+        """The shared Neo4j handle, after checking that the run is finished and the graph backend is on."""
         run = self.get(run_id)
         if run["status"] != "done" or run["enrichment"]["state"] != "done":
             raise HTTPException(409, f"run is {run['status']}, enrichment {run['enrichment']['state']}")
@@ -347,10 +347,73 @@ class RunManager:
                 from ..graph.neo4j_graph import Neo4jGraph
                 s = Settings()
                 self._shared["graph"] = Neo4jGraph(s.neo4j_uri, s.neo4j_user, s.neo4j_password)
+        return self._shared["graph"]
+
+    def _graph_call(self, fn, *a, **kw):
         try:
-            return self._shared["graph"].story_graph(story_id)
+            return fn(*a, **kw)
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(502, f"graph database error: {type(e).__name__}")
+
+    def story_graph(self, run_id: str, story_id: str) -> dict:
+        if not _STORY_ID.match(story_id):
+            raise HTTPException(404, "unknown story")
+        g = self._graph_for(run_id)
+        return self._graph_call(g.story_graph, story_id)
+
+    def _article_ids(self, run_id: str, scope: str, g) -> list[str]:
+        """Which articles the graph view covers: this run's (the default) or the most recent of every run."""
+        if scope == "all":
+            return self._graph_call(g.run_ids)
+        f = self.root / run_id / "out" / "stories.json"
+        if not f.exists():
+            raise HTTPException(404, "stories.json not found")
+        stories = json.loads(f.read_text(encoding="utf-8"))
+        return [c["event_id"] for st in stories for c in st["coverage"]]
+
+    @staticmethod
+    def _graph_types(types: str | None) -> set[str]:
+        from ..graph.neo4j_graph import NODE_SPECS
+        if not types:
+            return {"Article", "Paper", "Story"}                        # the default view; everything else is switched on by the user
+        asked = {t.strip() for t in types.split(",") if t.strip()}
+        bad = asked - set(NODE_SPECS)
+        if bad:
+            raise HTTPException(400, f"unknown node type(s): {', '.join(sorted(bad))}; allowed: {', '.join(NODE_SPECS)}")
+        return asked | {"Article"}
+
+    @staticmethod
+    def _graph_scope(scope: str) -> str:
+        if scope not in ("run", "all"):
+            raise HTTPException(400, "scope must be 'run' or 'all'")
+        return scope
+
+    def graph_summary(self, run_id: str, scope: str = "run") -> dict:
+        scope = self._graph_scope(scope)
+        g = self._graph_for(run_id)
+        ids = self._article_ids(run_id, scope, g)
+        return {"run_id": run_id, "scope": scope, **self._graph_call(g.run_summary, ids)}
+
+    def graph(self, run_id: str, types: str | None, min_score: float, max_nodes: int, scope: str = "run") -> dict:
+        scope = self._graph_scope(scope)
+        if not 0.0 <= min_score <= 1.0 or not 20 <= max_nodes <= 2000:
+            raise HTTPException(400, "min_score must be 0..1 and max_nodes 20..2000")
+        wanted = self._graph_types(types)
+        g = self._graph_for(run_id)
+        ids = self._article_ids(run_id, scope, g)
+        return {"run_id": run_id, "scope": scope, "max_nodes": max_nodes, **self._graph_call(g.run_graph, ids, wanted, min_score, max_nodes)}
+
+    def graph_neighbors(self, run_id: str, node: str, types: str | None, limit: int, scope: str = "run") -> dict:
+        from ..graph.neo4j_graph import parse_node_id
+        scope = self._graph_scope(scope)
+        if not parse_node_id(node) or not 1 <= limit <= 200:
+            raise HTTPException(400, "node must look like 'Article:<id>' with a known type, and limit must be 1..200")
+        wanted = self._graph_types(types) | {"Paper", "Story"}
+        g = self._graph_for(run_id)
+        ids = None if scope == "all" else self._article_ids(run_id, scope, g)
+        return {"run_id": run_id, "scope": scope, **self._graph_call(g.neighbors, node, wanted, ids, limit)}
 
     def delete(self, run_id: str) -> None:
         run = self.get(run_id)
@@ -419,6 +482,18 @@ def create_app(workdir: str | Path | None = None, make_pipeline=None, sync: bool
     @app.get("/api/runs/{run_id}/articles/{event_id}")
     def article(run_id: str, event_id: str):
         return mgr.article(run_id, event_id)
+
+    @app.get("/api/runs/{run_id}/graph/summary")
+    def graph_summary(run_id: str, scope: str = "run"):
+        return mgr.graph_summary(run_id, scope)
+
+    @app.get("/api/runs/{run_id}/graph/neighbors")
+    def graph_neighbors(run_id: str, node: str, types: str | None = None, limit: int = 50, scope: str = "run"):
+        return mgr.graph_neighbors(run_id, node, types, limit, scope)
+
+    @app.get("/api/runs/{run_id}/graph")
+    def run_graph(run_id: str, types: str | None = None, min_score: float = 0.0, max_nodes: int = 300, scope: str = "run"):
+        return mgr.graph(run_id, types, min_score, max_nodes, scope)
 
     @app.get("/api/runs/{run_id}/stories/{story_id}/graph")
     def story_graph(run_id: str, story_id: str):

@@ -206,3 +206,93 @@ def test_pipeline_is_closed_after_every_run(tmp_path, papers_dir):
     c = TestClient(create_app(tmp_path / "w", make, sync=True, frontend_dist=tmp_path / "none"))
     upload(c, papers_dir, ENGLISH[:2])
     assert closed == [True, True]                      # the extraction pipeline and the (inline) enrichment pipeline
+
+
+# ------------------------------------------------------------------------------------------------ run-level relationship graph API
+class FakeGraph:
+    """Records what the API asks of Neo4j, so the endpoints can be tested without a database."""
+    calls: list = []
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def run_ids(self, limit=3000):
+        FakeGraph.calls.append(("run_ids",))
+        return ["all-1", "all-2"]
+
+    def run_summary(self, ids):
+        FakeGraph.calls.append(("summary", list(ids)))
+        return {"nodes_by_type": {"Article": len(ids)}, "links_by_type": {"SIMILAR_TO": 0}}
+
+    def run_graph(self, ids, types, min_score, max_nodes):
+        FakeGraph.calls.append(("graph", list(ids), set(types), min_score, max_nodes))
+        return {"nodes": [{"id": "Article:x", "type": "Article", "label": "x", "props": {}}], "edges": [], "truncated": False, "total_nodes": 1}
+
+    def neighbors(self, node, types, ids, limit):
+        FakeGraph.calls.append(("neighbors", node, set(types), None if ids is None else list(ids), limit))
+        if node == "Article:boom":
+            raise RuntimeError("database is down")
+        return {"nodes": [], "edges": []}
+
+    def story_graph(self, story_id):
+        return {"story_id": story_id, "articles": [], "entities": [], "relations": []}
+
+
+@pytest.fixture()
+def graph_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("NP_GRAPH", "neo4j")
+    monkeypatch.setattr("newspaper_pipeline.graph.neo4j_graph.Neo4jGraph", FakeGraph)
+    FakeGraph.calls = []
+    return TestClient(create_app(tmp_path / "web", factory, sync=True, frontend_dist=tmp_path / "none"))
+
+
+def test_graph_endpoints_scope_to_the_runs_articles_and_validate_input(graph_client, papers_dir):
+    c = graph_client
+    rid = upload(c, papers_dir, ENGLISH[:2]).json()["id"]
+    run_ids = sorted(cov["event_id"] for s in c.get(f"/api/runs/{rid}/stories").json() for cov in s["coverage"])
+
+    r = c.get(f"/api/runs/{rid}/graph/summary").json()
+    assert r["scope"] == "run" and r["nodes_by_type"]["Article"] == len(run_ids)
+    assert sorted(FakeGraph.calls[-1][1]) == run_ids                              # the query is limited to this run's articles
+
+    g = c.get(f"/api/runs/{rid}/graph", params={"types": "Entity,Keyword", "min_score": 0.6, "max_nodes": 100}).json()
+    assert g["nodes"][0]["type"] == "Article" and g["truncated"] is False and g["max_nodes"] == 100
+    call = FakeGraph.calls[-1]
+    assert call[2] == {"Article", "Entity", "Keyword"} and call[3] == 0.6 and call[4] == 100     # Article is always included
+    c.get(f"/api/runs/{rid}/graph")
+    assert FakeGraph.calls[-1][2] == {"Article", "Paper", "Story"} and FakeGraph.calls[-1][4] == 300   # the default view
+
+    c.get(f"/api/runs/{rid}/graph", params={"scope": "all"})
+    assert FakeGraph.calls[-2] == ("run_ids",) and FakeGraph.calls[-1][1] == ["all-1", "all-2"]
+
+    assert c.get(f"/api/runs/{rid}/graph", params={"types": "Entity,Nope"}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph", params={"types": "Entity); MATCH (n) DETACH DELETE n //"}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph", params={"min_score": 2}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph", params={"max_nodes": 5}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph", params={"max_nodes": 99999}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph", params={"scope": "everything"}).status_code == 400
+    assert c.get("/api/runs/000000000000/graph").status_code == 404
+
+
+def test_graph_neighbors_endpoint_and_database_errors(graph_client, papers_dir):
+    c = graph_client
+    rid = upload(c, papers_dir, ENGLISH[:2]).json()["id"]
+    assert c.get(f"/api/runs/{rid}/graph/neighbors", params={"node": "Entity:aap", "types": "Article,Keyword", "limit": 20}).status_code == 200
+    call = FakeGraph.calls[-1]
+    assert call[1] == "Entity:aap" and call[2] == {"Article", "Keyword", "Paper", "Story"} and isinstance(call[3], list) and call[4] == 20
+    c.get(f"/api/runs/{rid}/graph/neighbors", params={"node": "Entity:aap", "scope": "all"})
+    assert FakeGraph.calls[-1][3] is None                                          # "all runs": article neighbours are not limited
+    assert c.get(f"/api/runs/{rid}/graph/neighbors", params={"node": "Bogus:aap"}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph/neighbors", params={"node": "Article:"}).status_code == 400
+    assert c.get(f"/api/runs/{rid}/graph/neighbors", params={"node": "Entity:aap", "limit": 0}).status_code == 400
+    r = c.get(f"/api/runs/{rid}/graph/neighbors", params={"node": "Article:boom"})
+    assert r.status_code == 502 and "RuntimeError" in r.json()["detail"] and "down" not in r.json()["detail"]   # no internals leak
+
+
+def test_run_graph_is_404_when_the_graph_backend_is_off_and_409_before_enrichment(client, papers_dir, graph_client):
+    rid = upload(client, papers_dir, ENGLISH[:2]).json()["id"]
+    for path in ("graph", "graph/summary"):
+        r = client.get(f"/api/runs/{rid}/{path}")
+        assert r.status_code == 404 and "NP_GRAPH=neo4j" in r.json()["detail"]
+    rid2 = upload(graph_client, papers_dir, ENGLISH[:2], enrich=False).json()["id"]
+    assert graph_client.get(f"/api/runs/{rid2}/graph").status_code == 409

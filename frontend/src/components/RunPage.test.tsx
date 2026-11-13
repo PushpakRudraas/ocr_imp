@@ -7,6 +7,7 @@ import { article, caps, cleanArticle, enrichment, run, solo, story, storyGraph }
 import RunPage from './RunPage';
 
 vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()), getRun: vi.fn(), getClean: vi.fn(), getOcr: vi.fn(), getPages: vi.fn(), enrichRun: vi.fn(), getConfig: vi.fn(), getStories: vi.fn(), getReview: vi.fn(), getArticle: vi.fn(), getStoryGraph: vi.fn() }));
+vi.mock('./graph/GraphView', () => ({ default: ({ runId }: { runId: string }) => <div>graph of {runId}</div> }));
 const m = vi.mocked(api);
 
 const setup = (pollMs = 5) => render(
@@ -104,6 +105,20 @@ describe('RunPage', () => {
     setup();
     await screen.findByRole('tab', { name: /Stories \(2\)/ });
     expect(screen.queryByRole('tab', { name: /Similar articles/ })).toBeNull();
+  });
+
+  it('adds the Graph tab only when the server has the relationship graph on and enrichment is done', async () => {
+    m.getRun.mockResolvedValue(run());
+    m.getConfig.mockResolvedValue({ ...caps, graph: 'neo4j' });
+    const u = userEvent.setup();
+    const first = setup();
+    await u.click(await screen.findByRole('tab', { name: 'Graph' }));
+    expect(await screen.findByText('graph of abcdefabcdef')).toBeInTheDocument();
+    first.unmount();
+    m.getConfig.mockResolvedValue({ ...caps, graph: 'none' });
+    setup();
+    await screen.findByRole('tab', { name: /Stories \(2\)/ });
+    expect(screen.queryByRole('tab', { name: 'Graph' })).toBeNull();
   });
 
   it('shows the failure reason and stops polling', async () => {

@@ -458,3 +458,109 @@ def test_pipeline_writes_to_mongo_pgvector_and_neo4j(manifest, tmp_path, mongo_u
     assert groups(res.docs) == groups(sqlite_docs)                                            # same answers as the local backends
     p.close(); p.close()                                                                      # close twice is safe
     store.db.client.drop_database(s.mongo_db)
+
+
+# ================================================================================================= relationship graph: the full model
+def test_graph_rows_for_the_new_node_types_use_only_clean_data(docs):
+    from newspaper_pipeline.graph.clean import clean_authors
+    rows = build_graph_rows(docs)
+    n = len(docs)
+    assert all(a["published"] for a in rows["articles"])
+    assert len(rows["links"]["ON_PAGE"]) >= n and {p["paper_id"] for p in rows["pages"]} == {d["newspaper"]["paper_id"] for d in docs}
+    assert len(rows["editions"]) >= 1 and rows["days"] == sorted(set(rows["days"]))
+    saved = sum(len(d["dedup_clustering"].get("matches") or []) + len(d["dedup_clustering"].get("review_candidates") or []) for d in docs)
+    assert len(rows["similarity"]) == saved > 0                                             # every saved pair becomes a link, none invented
+    assert all(0 <= r["score"] <= 1 and r["rel"] in ("SIMILAR_TO", "POSSIBLE_MATCH") for r in rows["similarity"])
+    for rel, cap in (("HAS_KEYWORD", 6), ("MAKES_CLAIM", 3)):
+        counts = {}
+        for r in rows["links"].get(rel, []):
+            counts[r["event_id"]] = counts.get(r["event_id"], 0) + 1
+        assert max(counts.values(), default=0) <= cap
+    assert all(clean_authors(a["name"]) for a in rows["authors"])                          # nothing junk became an author
+    assert not any(e["type"].startswith("General") for e in rows["events"])                # generic events do not get a node
+    assert {t["id"] for t in rows["topics"]} == {d["classification"]["topic"] for d in docs}
+
+
+def _counts(g):
+    return (dict(cypher(g, "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*)")),
+            dict(cypher(g, "MATCH ()-[r]->() RETURN type(r), count(*)")))
+
+
+@docker
+def test_neo4j_full_model_matches_the_rows_and_the_saved_similarity(graph, docs):
+    rows = build_graph_rows(docs)
+    summary = graph.write(docs)
+    for label, key in (("Edition", "editions"), ("Day", "days"), ("Page", "pages"), ("Section", "sections"), ("Author", "authors"),
+                       ("Topic", "topics"), ("Event", "events"), ("Claim", "claims"), ("Keyword", "keywords")):
+        assert cypher(graph, f"MATCH (n:{label}) RETURN count(n)")[0][0] == len(rows[key]) == summary[key], label
+    links = {(a, b, rel): (score, cross) for a, b, rel, score, cross in cypher(
+        graph, "MATCH (a:Article)-[x:SIMILAR_TO|POSSIBLE_MATCH]->(b:Article) RETURN a.event_id, b.event_id, type(x), x.score, x.cross_paper")}
+    expected = {(r["a"], r["b"], r["rel"]): r["score"] for r in rows["similarity"]}
+    assert {k: v[0] for k, v in links.items()} == expected                                  # same pairs, same scores as the engine saved
+    paper = {d["event_id"]: d["newspaper"]["paper_id"] for d in docs}
+    assert all(cross == (paper[a] != paper[b]) for (a, b, _), (_, cross) in links.items())
+    assert cypher(graph, "MATCH (:Article)-[:ON_PAGE]->(:Page)-[:ON_DAY]->(d:Day) RETURN count(DISTINCT d)")[0][0] == len(rows["days"])
+
+
+@docker
+def test_neo4j_write_is_repeatable_and_replaces_changed_links(graph, docs):
+    graph.write(docs)
+    before = _counts(graph)
+    graph.write(docs)
+    assert _counts(graph) == before                                                         # writing again duplicates nothing
+
+    changed = copy.deepcopy(docs[0])
+    eid = changed["event_id"]
+    incoming_before = cypher(graph, "MATCH ()-[x:SIMILAR_TO|POSSIBLE_MATCH]->(a:Article {event_id:$e}) RETURN count(x)", e=eid)[0][0]
+    old_topic = changed["classification"]["topic"]
+    changed["classification"]["topic"] = "zz_new_topic"
+    changed["keyphrases"] = ["a brand new phrase"]
+    changed["dedup_clustering"]["matches"] = []
+    changed["dedup_clustering"]["review_candidates"] = []
+    graph.write([changed])
+    assert [r[0] for r in cypher(graph, "MATCH (:Article {event_id:$e})-[:HAS_TOPIC]->(t:Topic) RETURN t.id", e=eid)] == ["zz_new_topic"]
+    assert [r[0] for r in cypher(graph, "MATCH (:Article {event_id:$e})-[:HAS_KEYWORD]->(k:Keyword) RETURN k.id", e=eid)] == ["a brand new phrase"]
+    assert cypher(graph, "MATCH (:Article {event_id:$e})-[x:SIMILAR_TO|POSSIBLE_MATCH]->() RETURN count(x)", e=eid)[0][0] == 0      # replaced, not kept
+    assert cypher(graph, "MATCH ()-[x:SIMILAR_TO|POSSIBLE_MATCH]->(a:Article {event_id:$e}) RETURN count(x)", e=eid)[0][0] == incoming_before
+    if not any(d["classification"]["topic"] == old_topic for d in docs[1:]):
+        assert cypher(graph, "MATCH (t:Topic {id:$t}) RETURN count(t)", t=old_topic)[0][0] == 0   # a node nothing points to is removed
+
+
+@docker
+def test_neo4j_run_graph_summary_filters_cap_and_neighbours(graph, docs):
+    graph.write(docs)
+    ids = [d["event_id"] for d in docs]
+    summ = graph.run_summary(ids)
+    assert summ["nodes_by_type"]["Article"] == len(docs)
+    assert summ["nodes_by_type"]["Paper"] == len({d["newspaper"]["paper_id"] for d in docs})
+    assert summ["links_by_type"]["SIMILAR_TO"] == cypher(graph, "MATCH ()-[x:SIMILAR_TO]->() RETURN count(x)")[0][0]
+
+    g = graph.run_graph(ids, {"Paper", "Story"}, 0.0, 500)
+    types = {n["type"] for n in g["nodes"]}
+    assert types == {"Article", "Paper", "Story"} and g["truncated"] is False
+    assert {e["type"] for e in g["edges"]} >= {"PUBLISHED_IN", "PART_OF", "SIMILAR_TO"} - {"SIMILAR_TO"}
+    node_ids = {n["id"] for n in g["nodes"]}
+    assert all(e["source"] in node_ids and e["target"] in node_ids for e in g["edges"])      # no edge points at a missing node
+    assert all(n["id"].startswith(n["type"] + ":") and n["label"] for n in g["nodes"])
+
+    sim_scores = [e["props"]["score"] for e in graph.run_graph(ids, set(), 0.0, 500)["edges"] if e["type"] == "SIMILAR_TO"]
+    assert sim_scores and not [e for e in graph.run_graph(ids, set(), 0.999, 500)["edges"] if e["type"] in ("SIMILAR_TO", "POSSIBLE_MATCH")]
+    assert [e for e in graph.run_graph(ids, set(), min(sim_scores), 500)["edges"] if e["type"] == "SIMILAR_TO"]
+
+    rich = graph.run_graph(ids, {"Paper", "Story", "Entity", "Keyword", "Topic", "Page", "Day", "Edition"}, 0.0, 2000)
+    assert {"Entity", "Keyword", "Topic", "Page", "Day", "Edition"} <= {n["type"] for n in rich["nodes"]}
+    capped = graph.run_graph(ids, {"Paper", "Story", "Entity", "Keyword", "Topic", "Page", "Day", "Edition"}, 0.0, 30)
+    assert capped["truncated"] is True and len(capped["nodes"]) == 30 and capped["total_nodes"] == len(rich["nodes"])
+    kept_types = {n["type"] for n in capped["nodes"]}
+    assert {"Paper", "Story", "Entity", "Keyword", "Topic", "Page", "Day", "Edition"} <= kept_types   # a cap never drops a whole type
+    assert sum(n["type"] == "Article" for n in capped["nodes"]) >= 1
+
+    only = graph.run_graph(ids[:2], {"Paper"}, 0.0, 100)
+    assert {n["id"] for n in only["nodes"] if n["type"] == "Article"} == {f"Article:{i}" for i in ids[:2]}   # the run's own articles only
+
+    ent = next(n["id"] for n in rich["nodes"] if n["type"] == "Entity")
+    nb = graph.neighbors(ent, {"Article", "Paper"}, ids[:3], 50)
+    assert all(n["type"] in ("Article", "Paper") for n in nb["nodes"]) and all(n["id"] in {f"Article:{i}" for i in ids[:3]} or n["type"] == "Paper" for n in nb["nodes"])
+    assert graph.neighbors("Nonsense:x", {"Article"}, None, 10) == {"nodes": [], "edges": []}
+    assert graph.neighbors("Entity:x`) MATCH (n) DETACH DELETE n //", {"Article"}, None, 10)["nodes"] == []
+    assert cypher(graph, "MATCH (a:Article) RETURN count(a)")[0][0] == len(docs)             # the injection attempt deleted nothing
