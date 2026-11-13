@@ -92,6 +92,20 @@ describe('RunPage', () => {
     expect(await screen.findByLabelText('Selected block')).toHaveTextContent(/Top story|SALE 50% OFF/);
   });
 
+  it('adds the "Similar articles" tab for a run with two or more newspapers once enrichment is done, and not for a single paper', async () => {
+    const two = run({ papers: [...run().papers, { id: 'hindustan_times', name: 'Hindustan Times', language: 'en', edition: 'main', reputation: 'high', filename: 'b.pdf', size: 1 }] });
+    m.getRun.mockResolvedValue(two);
+    const u = userEvent.setup();
+    const first = setup();
+    await u.click(await screen.findByRole('tab', { name: /Similar articles \(1\)/ }));          // the story fixture has one story in 2 papers
+    expect(await screen.findByRole('heading', { name: 'Similar articles across newspapers' })).toBeInTheDocument();
+    first.unmount();
+    m.getRun.mockResolvedValue(run());
+    setup();
+    await screen.findByRole('tab', { name: /Stories \(2\)/ });
+    expect(screen.queryByRole('tab', { name: /Similar articles/ })).toBeNull();
+  });
+
   it('shows the failure reason and stops polling', async () => {
     m.getRun.mockResolvedValue(run({ status: 'failed', stage: 'ocr', metrics: null, error: 'RuntimeError: model exploded' }));
     setup();

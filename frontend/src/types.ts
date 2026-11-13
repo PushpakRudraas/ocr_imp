@@ -184,12 +184,27 @@ export interface Claim {
   corroborated_by?: string[];
 }
 
+/** One pair the matching engine scored, as saved on an article: the other article, the score and the signals behind it. */
+export interface MatchEdge {
+  event_id: string;
+  score: number;
+  reasons?: string[];
+  components?: MatchComponents | null;
+  veto?: string | null;
+  cosine?: number | null;
+}
+
+export interface ArticleEntity { text: string; type: string; mentions?: number }
+
 export interface Article {
   event_id: string;
   event: { type: string; trigger: string; actor: string | null; institution: string | null; date: string; confidence: string };
   claims: Claim[];
   keyphrases: string[];
   summary: { one_line: string; multi_doc_summary: string };
+  entities?: ArticleEntity[];
+  geo?: { primary_location: string | null; country_iso?: string | null };
+  dedup_clustering?: { matches?: MatchEdge[]; review_candidates?: MatchEdge[] };
   newspaper: {
     paper: string;
     text: string;
@@ -197,6 +212,12 @@ export interface Article {
     translated_headline: string | null;
     headline: string;
     translation_status: string | null;
+    page_no?: number;
+    byline?: string | null;
+    section?: string | null;
+    language?: string | null;
+    original_text?: string | null;
+    original_headline?: string | null;
   };
   [key: string]: unknown;
 }

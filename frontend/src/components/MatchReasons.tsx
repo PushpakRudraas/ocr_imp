@@ -7,7 +7,7 @@ const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 /** The signals behind one match, as small chips: a strong signal is plain, a weak one is highlighted so a reviewer sees what the
  *  decision rested on. "Place" is shown as "not stated" when one article names no place (it then counts for nothing either way). */
-function Signals({ c }: { c: MatchComponents }) {
+export function Signals({ c }: { c: MatchComponents }) {
   return (
     <span className="match-signals">
       {LABELS.map(([k, label]) => {

@@ -8,12 +8,13 @@ import MetricsBar from './MetricsBar';
 import OcrResults from './OcrResults';
 import PageView from './PageView';
 import ReviewTable from './ReviewTable';
+import SimilarArticles from './SimilarArticles';
 import StagesStepper from './StagesStepper';
 import StoriesView from './StoriesView';
 
 const DEFAULT_STAGES = ['ingest', 'ocr', 'clean'];       // the server sends the real list (with 'queued' and 'store' when Kafka is on)
 const DEFAULT_ENRICH_STAGES = ['cluster', 'enrich', 'export'];
-type Tab = 'articles' | 'ocr' | 'pages' | 'stories' | 'review';
+type Tab = 'articles' | 'ocr' | 'pages' | 'stories' | 'similar' | 'review';
 
 export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const { runId = '' } = useParams();
@@ -133,6 +134,9 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
             {enriched && stories && (
               <>
                 <button role="tab" aria-selected={active === 'stories'} onClick={() => setTab('stories')}>Stories ({stories.length})</button>
+                {run.papers.length > 1 && (
+                  <button role="tab" aria-selected={active === 'similar'} onClick={() => setTab('similar')}>Similar articles ({stories.filter((x) => x.n_papers >= 2).length})</button>
+                )}
                 <button role="tab" aria-selected={active === 'review'} onClick={() => setTab('review')}>Needs review ({review.length})</button>
               </>
             )}
@@ -141,6 +145,7 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
           {active === 'ocr' && (ocr ? <OcrResults runId={run.id} items={ocr} locked={run.enrichment.state !== 'off' && run.enrichment.state !== 'failed'} /> : ocrError ? <p className="notice warn">{ocrError}</p> : <p className="empty">Loading OCR results...</p>)}
           {active === 'pages' && pageInfo && ocr && <PageView runId={run.id} pages={pageInfo} items={ocr} />}
           {active === 'stories' && enriched && stories && <StoriesView runId={run.id} stories={stories} />}
+          {active === 'similar' && enriched && stories && <SimilarArticles runId={run.id} stories={stories} />}
           {active === 'review' && enriched && <ReviewTable items={review} />}
         </>
       )}
