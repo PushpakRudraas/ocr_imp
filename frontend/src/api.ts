@@ -1,4 +1,4 @@
-import type { Article, Capabilities, CleanArticle, GraphNeighbors, GraphScope, GraphSummary, OcrArticle, PageInfo, RunGraph, ReviewItem, Run, Story, StoryGraph, UploadItem } from './types';
+import type { Article, Capabilities, CleanArticle, OcrArticle, PageInfo, ReviewItem, Run, Story, StoryGraph, UploadItem } from './types';
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? '';
 
@@ -47,12 +47,6 @@ export const markOcr = (id: string, articleId: string, label: 'ad' | 'news') =>
   request<{ article_id: string; label: string }>(`/api/runs/${id}/ocr/${articleId}/mark`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) });
 export const getPages = (id: string) => request<PageInfo[]>(`/api/runs/${id}/pages`);
 export const pageImageUrl = (id: string, paperId: string, pageNo: number) => `/api/runs/${id}/pages/${encodeURIComponent(paperId)}/${pageNo}/image`;
-/** Relationship graph of a run (Neo4j). Article nodes are always returned; `types` adds other node types. */
-export const getGraphSummary = (id: string, scope: GraphScope = 'run') => request<GraphSummary>(`/api/runs/${id}/graph/summary?scope=${scope}`);
-export const getRunGraph = (id: string, o: { types: string[]; minScore: number; maxNodes: number; scope: GraphScope }) =>
-  request<RunGraph>(`/api/runs/${id}/graph?types=${encodeURIComponent(o.types.join(','))}&min_score=${o.minScore}&max_nodes=${o.maxNodes}&scope=${o.scope}`);
-export const getGraphNeighbors = (id: string, node: string, types: string[], scope: GraphScope = 'run', limit = 50) =>
-  request<GraphNeighbors>(`/api/runs/${id}/graph/neighbors?node=${encodeURIComponent(node)}&types=${encodeURIComponent(types.join(','))}&scope=${scope}&limit=${limit}`);
 export const getStories = (id: string) => request<Story[]>(`/api/runs/${id}/stories`);
 export const getReview = (id: string) => request<ReviewItem[]>(`/api/runs/${id}/review`);
 export const getArticle = (id: string, eventId: string) => request<Article>(`/api/runs/${id}/articles/${eventId}`);

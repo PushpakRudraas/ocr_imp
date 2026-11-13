@@ -266,16 +266,3 @@ export interface PageInfo {
   paper_id: string; page_no: number; width: number; height: number;
   yolo: boolean; layout?: boolean; ad_conf?: number; regions: PageRegion[]; blocks?: PageBlock[];
 }
-
-// ---- relationship graph (Neo4j) ----
-export type GraphNodeType = 'Paper' | 'Edition' | 'Day' | 'Page' | 'Section' | 'Author' | 'Article' | 'Story' | 'Entity' | 'Topic' | 'Event' | 'Claim' | 'Keyword';
-export type GraphScope = 'run' | 'all';
-export interface GraphNode { id: string; type: GraphNodeType; label: string; props: Record<string, unknown> }
-export interface GraphEdge { id: string; source: string; target: string; type: string; props: Record<string, unknown> }
-export interface RunGraph {
-  run_id: string; scope: GraphScope; max_nodes: number; nodes: GraphNode[]; edges: GraphEdge[]; truncated: boolean; total_nodes: number;
-}
-export interface GraphSummary {
-  run_id: string; scope: GraphScope; nodes_by_type: Partial<Record<GraphNodeType, number>>; links_by_type: Record<string, number>;
-}
-export interface GraphNeighbors { run_id?: string; nodes: GraphNode[]; edges: GraphEdge[] }

@@ -4,7 +4,6 @@ import { ApiError, enrichRun, getClean, getConfig, getOcr, getPages, getReview, 
 import type { CleanArticle, OcrArticle, PageInfo, ReviewItem, Run, Story } from '../types';
 import CleanArticles from './CleanArticles';
 import EnrichmentPanel from './EnrichmentPanel';
-import GraphView from './graph/GraphView';
 import MetricsBar from './MetricsBar';
 import OcrResults from './OcrResults';
 import PageView from './PageView';
@@ -15,7 +14,7 @@ import StoriesView from './StoriesView';
 
 const DEFAULT_STAGES = ['ingest', 'ocr', 'clean'];       // the server sends the real list (with 'queued' and 'store' when Kafka is on)
 const DEFAULT_ENRICH_STAGES = ['cluster', 'enrich', 'export'];
-type Tab = 'articles' | 'ocr' | 'pages' | 'stories' | 'similar' | 'graph' | 'review';
+type Tab = 'articles' | 'ocr' | 'pages' | 'stories' | 'similar' | 'review';
 
 export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const { runId = '' } = useParams();
@@ -23,7 +22,6 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const [stages, setStages] = useState(DEFAULT_STAGES);
   const [enrichStages, setEnrichStages] = useState(DEFAULT_ENRICH_STAGES);
   const [bus, setBus] = useState<'kafka' | 'inline'>('inline');
-  const [graphOn, setGraphOn] = useState(false);                   // the server has the Neo4j relationship graph switched on
   const [clean, setClean] = useState<CleanArticle[] | null>(null);
   const [ocr, setOcr] = useState<OcrArticle[] | null>(null);
   const [pageInfo, setPageInfo] = useState<PageInfo[] | null>(null);
@@ -38,7 +36,7 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
   const loaded = useRef({ clean: false, ocr: false, results: false });
 
   useEffect(() => {
-    getConfig().then((c) => { setStages(c.stages); setEnrichStages(c.enrich_stages ?? DEFAULT_ENRICH_STAGES); setBus(c.enrichment_bus ?? 'inline'); setGraphOn(c.graph === 'neo4j'); }).catch(() => undefined);
+    getConfig().then((c) => { setStages(c.stages); setEnrichStages(c.enrich_stages ?? DEFAULT_ENRICH_STAGES); setBus(c.enrichment_bus ?? 'inline'); }).catch(() => undefined);
   }, []);
 
   useEffect(() => { loaded.current = { clean: false, ocr: false, results: false }; setClean(null); setOcr(null); setPageInfo(null); setOcrError(null); setStories(null); setReview([]); setTab(null); }, [runId]);
@@ -139,7 +137,6 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
                 {run.papers.length > 1 && (
                   <button role="tab" aria-selected={active === 'similar'} onClick={() => setTab('similar')}>Similar articles ({stories.filter((x) => x.n_papers >= 2).length})</button>
                 )}
-                {graphOn && <button role="tab" aria-selected={active === 'graph'} onClick={() => setTab('graph')}>Graph</button>}
                 <button role="tab" aria-selected={active === 'review'} onClick={() => setTab('review')}>Needs review ({review.length})</button>
               </>
             )}
@@ -149,7 +146,6 @@ export default function RunPage({ pollMs = 1500 }: { pollMs?: number }) {
           {active === 'pages' && pageInfo && ocr && <PageView runId={run.id} pages={pageInfo} items={ocr} />}
           {active === 'stories' && enriched && stories && <StoriesView runId={run.id} stories={stories} />}
           {active === 'similar' && enriched && stories && <SimilarArticles runId={run.id} stories={stories} runDate={run.run_date} />}
-          {active === 'graph' && enriched && graphOn && <GraphView runId={run.id} onOpenTab={(t) => setTab(t)} />}
           {active === 'review' && enriched && <ReviewTable items={review} />}
         </>
       )}
